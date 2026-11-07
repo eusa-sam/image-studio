@@ -1,0 +1,19 @@
+{
+  "repository": "ABDALLALSWAITI/linex-storybook-lora",
+  "revision": "a22b9dd9e0d2f9f985166f4f5bd99d61ee5c19a9",
+  "license": "creativeml-openrail-m",
+  "files": [
+    {
+      "path": "README.md",
+      "size": 2959,
+      "sha256": null,
+      "blob_id": "fe347064b25dbdd0c66e75a88af11910d47c26d2"
+    },
+    {
+      "path": "lines_style.safetensors",
+      "size": 170128272,
+      "sha256": "52e0c52eea9d15c92d0da1c14a9a5ae99a7a7398ab55f4932114c333a54d9fff",
+      "blob_id": "c6cf2a17e37b7e6822b853cca52dae030ba0da0b"
+    }
+  ]
+}

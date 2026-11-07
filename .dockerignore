@@ -1,0 +1,9 @@
+**
+!pyproject.toml
+!uv.lock
+!backend/
+!backend/**
+!scripts/
+!scripts/**
+**/__pycache__/**
+**/*.pyc

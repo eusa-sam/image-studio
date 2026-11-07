@@ -1,0 +1,35 @@
+name: image-studio
+services:
+  studio:
+    build: .
+    ports:
+      - "127.0.0.1:8765:8765"
+    init: true
+    stop_grace_period: 90s
+    environment:
+      IMAGE_STUDIO_CONTAINER: "1"
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility
+      HF_HOME: /app/data/cache/huggingface
+      TORCH_HOME: /app/data/cache/torch
+      CUDA_CACHE_PATH: /app/data/cache/cuda
+      TRITON_CACHE_DIR: /app/data/cache/triton
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - type: bind
+        source: ${IMAGE_STUDIO_MODELS:-./models}
+        target: /app/models
+        read_only: true
+      - type: bind
+        source: ${IMAGE_STUDIO_DATA:-./data}
+        target: /app/data
+      - type: bind
+        source: ${IMAGE_STUDIO_OUTPUTS:-./outputs}
+        target: /app/outputs
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]

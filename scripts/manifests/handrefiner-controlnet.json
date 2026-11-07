@@ -1,0 +1,37 @@
+{
+  "repository": "hr16/ControlNet-HandRefiner-pruned",
+  "revision": "f0917f0595ecb7f6435f49e4b2b28f8dd68ab0cb",
+  "license": "apache-2.0",
+  "files": [
+    {
+      "path": ".gitattributes",
+      "size": 1519,
+      "sha256": null,
+      "blob_id": "a6344aac8c09253b3b630fb776ae94478aa0275b"
+    },
+    {
+      "path": "README.md",
+      "size": 219,
+      "sha256": null,
+      "blob_id": "3d8bd697d33d4bab88c0adce909ea4198b564799"
+    },
+    {
+      "path": "control_sd15_inpaint_depth_hand_fp16.safetensors",
+      "size": 722601104,
+      "sha256": "944b74b8ed3701117ffe5550026bbff2c8616f1c92b1bb2fee00e5349ff46256",
+      "blob_id": "62f8a9116a5fce3549014fb2eada19e92665fce5"
+    },
+    {
+      "path": "graphormer_hand_state_dict.bin",
+      "size": 855658184,
+      "sha256": "b78081d105dc730c179eb0e2366bea999ceb4363070bb3aa1ae31fcf878a8a41",
+      "blob_id": "8e505381336b23398842bed7fd5a38b6ff2f2aec"
+    },
+    {
+      "path": "hrnetv2_w64_imagenet_pretrained.pth",
+      "size": 513111608,
+      "sha256": "41ed675bcd1f4f4b62a49bad64901f08f8b67ed744b715da87738f926dae685c",
+      "blob_id": "c0c454b9c110835e36790511e5b8b055bf94b2af"
+    }
+  ]
+}

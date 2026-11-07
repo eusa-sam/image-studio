@@ -1,0 +1,102 @@
+{
+  "repository": "Efficient-Large-Model/Sana_Sprint_1.6B_1024px_diffusers",
+  "revision": "19683c58b7ea290e55cedd8950ae1d86ada7ef96",
+  "files": [
+    {
+      "path": "LICENSE",
+      "size": 11358,
+      "sha256": null,
+      "blob_id": "d645695673349e3947e8e5ae42332d0ac3164cd7"
+    },
+    {
+      "path": "README.md",
+      "size": 6543,
+      "sha256": null,
+      "blob_id": "910763fed53d0734adedfdd7ad04d52a25d64cce"
+    },
+    {
+      "path": "model_index.json",
+      "size": 392,
+      "sha256": null,
+      "blob_id": "795d41a9eaf524bb0d84fbac6a325609d4f737d1"
+    },
+    {
+      "path": "scheduler/scheduler_config.json",
+      "size": 160,
+      "sha256": null,
+      "blob_id": "6d3081b117d2ea1c4db209edf5914a80c9ed754e"
+    },
+    {
+      "path": "text_encoder/config.json",
+      "size": 890,
+      "sha256": null,
+      "blob_id": "b9834570dc12b608f336a00e3f81658d17a85b6c"
+    },
+    {
+      "path": "text_encoder/model-00001-of-00002.safetensors",
+      "size": 4988024144,
+      "sha256": "e909230aabafad02d097c7dc02f2ae062b4e6b0593477c1f07679d277e09ce71",
+      "blob_id": "2ec6c12cdb4f33eeb8fc0e96e081187943a90a70"
+    },
+    {
+      "path": "text_encoder/model-00002-of-00002.safetensors",
+      "size": 240691624,
+      "sha256": "48e14f6b7a917e54cabc4ff2047ac2bfe0dae663e771eed3a8acf4ea27dcac18",
+      "blob_id": "56158202c6d7382ec0e4235466b897fba141aa52"
+    },
+    {
+      "path": "text_encoder/model.safetensors.index.json",
+      "size": 22495,
+      "sha256": null,
+      "blob_id": "36d550130eb056ee9c28e438c0e3d1b28fddab84"
+    },
+    {
+      "path": "tokenizer/special_tokens_map.json",
+      "size": 636,
+      "sha256": null,
+      "blob_id": "8d6368f7e735fbe4781bf6e956b7c6ad0586df80"
+    },
+    {
+      "path": "tokenizer/tokenizer.json",
+      "size": 34362873,
+      "sha256": "5f7eee611703c5ce5d1eee32d9cdcfe465647b8aff0c1dfb3bed7ad7dbb05060",
+      "blob_id": "a4a305d1de4d8f47c0252b4d7fe65a10dd8e2c22"
+    },
+    {
+      "path": "tokenizer/tokenizer.model",
+      "size": 4241003,
+      "sha256": "61a7b147390c64585d6c3543dd6fc636906c9af3865a5548f27f31aee1d4c8e2",
+      "blob_id": "796efe9ab515c15e146ce7588e6d7b9b8134dbf8"
+    },
+    {
+      "path": "tokenizer/tokenizer_config.json",
+      "size": 46996,
+      "sha256": null,
+      "blob_id": "36ba12877e7efaba5252f7b17ab337a59d953563"
+    },
+    {
+      "path": "transformer/config.json",
+      "size": 624,
+      "sha256": null,
+      "blob_id": "fb69cb8e561b37527dff0ab0c3327a3b4699fa93"
+    },
+    {
+      "path": "transformer/diffusion_pytorch_model.safetensors",
+      "size": 3220530536,
+      "sha256": "effac51c73537487ac1505993f0e7fbd292c310b23aae96f2c3e53131e876f2d",
+      "blob_id": "36d877b2d7ada5ae3f4f8d72d3596b25902f9561"
+    },
+    {
+      "path": "vae/config.json",
+      "size": 1280,
+      "sha256": null,
+      "blob_id": "e265030c18bc640fa24267beb2a92c3a187cba5b"
+    },
+    {
+      "path": "vae/diffusion_pytorch_model.safetensors",
+      "size": 1249044836,
+      "sha256": "dfd991d1b54ffabf22745c5885589d8f2a7bc59930d95d92bd741c4fc64454bb",
+      "blob_id": "aafb390f079447364369923645aafb2e64e64030"
+    }
+  ]
+}

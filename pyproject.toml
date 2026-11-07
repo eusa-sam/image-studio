@@ -1,0 +1,41 @@
+[project]
+name = "image-studio"
+version = "0.1.0"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+  "filelock==4.2.9",
+  "torch==2.11.0+cu128",
+  "torchvision==0.26.0+cu128",
+  "diffusers==0.42.1",
+  "transformers==5.22.1",
+  "accelerate==1.15.0",
+  "safetensors==0.8.0",
+  "huggingface-hub==2.4.0",
+  "peft==0.21.2",
+  "sentencepiece==0.2.3",
+  "protobuf==7.36.2",
+  "spandrel==0.4.2",
+  "fastapi>=0.162.0",
+  "uvicorn>=0.54.0",
+  "httpx>=0.28.1",
+  "onnxruntime>=1.31.1",
+]
+
+[project.optional-dependencies]
+prepare-detectors = [
+    "onnx>=1.23.2",
+    "ultralytics>=8.4.203",
+]
+
+[tool.uv]
+cache-dir = "data/cache/uv"
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu128" }
+torchvision = { index = "pytorch-cu128" }
+
