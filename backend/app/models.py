@@ -21,8 +21,8 @@ class LoraSelection(BaseModel):
 class Settings(BaseModel):
     model_config = ConfigDict(extra='forbid', strict=True)
     model: str
-    width: int = Field(default=1024, ge=256, le=1024, multiple_of=64)
-    height: int = Field(default=1024, ge=256, le=1024, multiple_of=64)
+    width: int = Field(default=1024, ge=256, multiple_of=64)
+    height: int = Field(default=1024, ge=256, multiple_of=64)
     steps: int = Field(default=20, ge=1, le=60)
     guidance: float = Field(default=5.0, ge=0, le=20)
     seed: int = Field(default=42, ge=0, le=2**32 - 1)
@@ -99,11 +99,11 @@ def fingerprint(path):
     if path.is_dir():
         family=bundle_family(path)
         if family=='flux2':
-            from .flux2 import bundle_fingerprint
+            from backend.app.inference.models.flux2 import bundle_fingerprint
         elif family=='zimage':
-            from .z_image import bundle_fingerprint
+            from backend.app.inference.models.z_image import bundle_fingerprint
         else:
-            from .anima import bundle_fingerprint
+            from backend.app.inference.models.anima import bundle_fingerprint
         return bundle_fingerprint(path)
     stat = path.stat()
     return dict(bytes=stat.st_size, mtime_ns=stat.st_mtime_ns)
@@ -129,7 +129,7 @@ def scan():
                 if not path.resolve().is_relative_to(MODEL_ROOT.resolve()):raise ValueError('모델 루트 밖 경로')
                 family=bundle_family(path);row['family']=family
                 if family=='zimage':
-                    from .z_image import bundle_spec
+                    from backend.app.inference.models.z_image import bundle_spec
                     row['variant']=bundle_spec(path).get('variant','original')
                 row.update(fingerprint=fingerprint(path),available=True,reason={'flux2':'FLUX.2 Klein 4B','zimage':'Z-Image-Turbo','anima':'ANIMA'}[family]+' bundle · 실행 시 전체 해시 검사')
             except (OSError,ValueError,KeyError,TypeError) as exc:row['reason']=str(exc)
@@ -197,7 +197,7 @@ def scan():
                 if not valid:
                     raise ValueError('구성요소 프로필과 폴더/형식이 맞지 않습니다.')
                 if profile['kind']=='embedding':
-                    from .textual_inversion import read_embedding
+                    from backend.app.inference.conditioning.textual_inversion import read_embedding
                     read_embedding(path,profile)
                 row.update(component=profile['kind'], profile=profile, reason='로컬 프로필 있음. 사용 시 파일 해시와 로더 호환성을 검사합니다.')
         except (OSError, ValueError, KeyError, TypeError) as exc:
@@ -217,8 +217,8 @@ def embedding_components(selected, inventory, family):
         path=(MODEL_ROOT/item['path']).resolve()
         if not path.is_relative_to(MODEL_ROOT.resolve()) or fingerprint(path)!=item['fingerprint']:raise ValueError('EMBEDDING_CHANGED')
         components['embedding'+str(index)]={k:item[k] for k in ('path','fingerprint','profile')}
-    from .textual_inversion import validated_embeddings
-    from .prompt_tokens import tokenizers
+    from backend.app.inference.conditioning.textual_inversion import validated_embeddings
+    from backend.app.inference.conditioning.prompt_tokens import tokenizers
     validated_embeddings([(row,MODEL_ROOT/row['path']) for row in components.values()],family,tokenizers(family))
     return components
 
@@ -237,10 +237,10 @@ def preflight(settings):
     if settings['embeddings'] and model.get('family') not in ('sd1_candidate','sd1_inpaint_candidate','sd2_candidate','sdxl_candidate'):
         raise ValueError('임베딩은 SD1/SD2/SDXL만 지원합니다.')
     if model.get('family')=='flux2':
-        from .flux2 import execution_plan
+        from backend.app.inference.models.flux2 import execution_plan
         return execution_plan(model,settings,inventory)
     if model.get('family')=='zimage':
-        from .z_image import execution_plan
+        from backend.app.inference.models.z_image import execution_plan
         return execution_plan(model,settings,inventory)
     if settings['flow']=='reference_edit':raise ValueError('참고 이미지 편집은 FLUX.2 Klein 모델을 선택하세요.')
     if settings['ip_adapter']:
@@ -359,7 +359,7 @@ def krea2_plan(model, settings, inventory):
         loras.append(dict(id=item['id'],weight=selection['weight'],**{k:item[k] for k in ('path','fingerprint','profile')}))
     manifest=MODEL_ROOT/'configs/krea2/manifest.json'
     if not manifest.resolve().is_relative_to(MODEL_ROOT.resolve()):raise ValueError('설정 경로가 모델 루트 밖입니다.')
-    from .krea2 import verify_config
+    from backend.app.inference.models.krea2 import verify_config
     verify_config(manifest.parent)
     return dict(schema_version=1,runner='krea2_'+settings['flow'],model_path=model['path'],fingerprint=model['fingerprint'],
                 settings=settings,components=components,loras=loras,krea2=model['krea2'],

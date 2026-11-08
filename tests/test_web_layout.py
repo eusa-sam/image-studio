@@ -25,6 +25,13 @@ class Markup(HTMLParser):
 
 
 class WebLayoutTests(unittest.TestCase):
+    def test_dimensions_have_no_arbitrary_upper_bound(self):
+        nodes = Markup(Path('backend/app/web/index.html').read_text(encoding='utf-8')).nodes
+        for identifier in ('width','height'):
+            attributes = nodes[identifier][0]
+            self.assertNotIn('max', attributes)
+            self.assertEqual(attributes['step'], '64')
+
     def test_tabs_keep_editor_controls_and_results_in_separate_panels(self):
         nodes = Markup(Path('backend/app/web/index.html').read_text(encoding='utf-8')).nodes
         for identifier in ('positive', 'negative', 'model', 'clip', 'clip2', 'flow',

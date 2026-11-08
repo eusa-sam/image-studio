@@ -5,7 +5,7 @@ from pathlib import Path
 import torch
 from safetensors.torch import save_file
 from diffusers import StableDiffusionPipeline, UNet2DConditionModel, AutoencoderKL, DDIMScheduler
-from backend.app.lora import apply_loras, set_lora_weights, validate_lora
+from backend.app.inference.conditioning.lora import apply_loras, set_lora_weights, validate_lora
 
 
 class DoraTests(unittest.TestCase):

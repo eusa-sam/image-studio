@@ -18,6 +18,13 @@ class OllamaListenerTests(unittest.TestCase):
             with self.assertRaises(OllamaError):Ollama().models()
             opener.return_value.open.assert_not_called()
 
+    def test_missing_custom_port_is_reported_without_requesting_the_default(self):
+        with patch('backend.app.ollama.local_listener',return_value=False) as listener,patch('urllib.request.build_opener') as opener:
+            with self.assertRaisesRegex(OllamaError,'18766'):
+                Ollama('http://127.0.0.1:18766').models()
+            listener.assert_called_once_with(18766)
+            opener.return_value.open.assert_not_called()
+
     def test_unknown_or_listening_still_checks_real_http_models(self):
         response=Mock();response.__enter__=Mock(return_value=response);response.__exit__=Mock(return_value=False)
         response.read.return_value=b'{"models":[{"name":"external","size_vram":100}]}'

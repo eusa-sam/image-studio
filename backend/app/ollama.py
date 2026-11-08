@@ -47,6 +47,7 @@ class Ollama:
             async with httpx.AsyncClient(trust_env=False, follow_redirects=False, timeout=180) as client:
                 async with client.stream('POST', self.base_url+self.endpoint+'/chat', json=body) as response:
                     response.raise_for_status()
+                    placement_checked = body.get('options',{}).get('num_gpu') == 0
                     async for line in response.aiter_lines():
                         if len(line.encode('utf-8')) > 2 * 1024 * 1024:
                             raise OllamaError('Ollama 응답이 너무 큽니다.')
@@ -55,6 +56,16 @@ class Ollama:
                         result = json.loads(line)
                         if not isinstance(result, dict) or result.get('error'):
                             raise OllamaError('Ollama 스트림 응답 오류')
+                        if not placement_checked and not result.get('done'):
+                            placement_checked = True
+                            try:
+                                placement = await client.get(self.base_url+self.endpoint+'/ps',timeout=2)
+                                placement.raise_for_status()
+                                row = next((m for m in placement.json().get('models',[]) if m.get('name',m.get('model')) == body['model']),{})
+                                if type(row.get('size_vram')) is int:
+                                    result['_gpu_bytes'] = row['size_vram']
+                            except (httpx.HTTPError,ValueError,TypeError,AttributeError):
+                                pass  # Placement diagnostics must not interrupt a valid response.
                         yield result
         except (httpx.HTTPError, ValueError) as exc:
             raise OllamaError('로컬 Ollama 스트림 실패: ' + str(exc)) from exc
@@ -68,7 +79,7 @@ class Ollama:
             from urllib.parse import urlsplit
             url=urlsplit(self.base_url)
             if url.hostname in ('127.0.0.1','localhost','::1') and local_listener(url.port or (443 if url.scheme=='https' else 80)) is False:
-                raise urllib.error.URLError(ConnectionRefusedError('Ollama is not listening on local port 11434'))
+                raise urllib.error.URLError(ConnectionRefusedError(f'Ollama is not listening on local port {url.port or (443 if url.scheme=="https" else 80)}'))
             with opener.open(request, timeout=timeout) as response:
                 content = response.read(2 * 1024 * 1024 + 1)
                 if len(content) > 2 * 1024 * 1024:
@@ -95,8 +106,8 @@ class Ollama:
         info = self.request('show', {'model': name})
         if info.get('remote_host') or info.get('remote_model') or 'completion' not in info.get('capabilities', []):
             raise ValueError('원격 모델 또는 대화 미지원 모델은 사용할 수 없습니다.')
-        if info.get('thinking') is None and 'thinking' in info.get('capabilities', []):
-            info = dict(info, thinking={'values': [False, True], 'default': None, 'source': 'capability_fallback'})
+        if 'thinking' in info.get('capabilities',[]) and not info.get('thinking',{}).get('values'):
+            info = dict(info, thinking=dict(info.get('thinking',{}),values=[True,False]))
         return record, info
 
     def running(self):

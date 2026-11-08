@@ -4,7 +4,7 @@ from pathlib import Path
 import torch
 from safetensors.torch import save_file
 from transformers import CLIPVisionConfig,CLIPVisionModelWithProjection
-from backend.app.ip_adapter import load_vision
+from backend.app.inference.conditioning.ip_adapter import load_vision
 
 
 class VisionTests(unittest.TestCase):
@@ -29,7 +29,7 @@ class VisionTests(unittest.TestCase):
     def test_adapter_checks_all_targets_before_registering(self):
         from types import SimpleNamespace
         from unittest.mock import Mock,patch
-        from backend.app.ip_adapter import attach_adapter
+        from backend.app.inference.conditioning.ip_adapter import attach_adapter
         weights={'image_proj.proj.weight':torch.zeros(8192,1024,dtype=torch.float16),
                  'image_proj.proj.bias':torch.zeros(8192),'image_proj.norm.weight':torch.ones(2048),
                  'image_proj.norm.bias':torch.zeros(2048),'ip_adapter.1.to_k_ip.weight':torch.zeros(2,2048),
@@ -38,7 +38,7 @@ class VisionTests(unittest.TestCase):
         pipe=SimpleNamespace(unet=SimpleNamespace(dtype=torch.float16,config=SimpleNamespace(cross_attention_dim=2048),
              attn_processors={'block.attn1.processor':None,'block.attn2.processor':None},get_submodule=lambda name:attention),
              register_modules=Mock(),load_ip_adapter=Mock(),set_ip_adapter_scale=Mock())
-        with patch('backend.app.ip_adapter.load_vision',return_value=SimpleNamespace(config=SimpleNamespace(projection_dim=1024))),patch('safetensors.torch.load_file',return_value=weights):
+        with patch('backend.app.inference.conditioning.ip_adapter.load_vision',return_value=SimpleNamespace(config=SimpleNamespace(projection_dim=1024))),patch('safetensors.torch.load_file',return_value=weights):
             attach_adapter(pipe,'adapter','vision','config',.7)
             pipe.set_ip_adapter_scale.assert_called_once_with(.7)
             self.assertTrue(pipe.load_ip_adapter.call_args.kwargs['local_files_only'])

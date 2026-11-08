@@ -3,7 +3,7 @@ from types import SimpleNamespace
 
 from diffusers import AnimaModularPipeline
 from diffusers.modular_pipelines.anima.denoise import AnimaDenoiseStep, AnimaDenoiseLoopWrapper
-from backend.app.anima import progress_reporting
+from backend.app.inference.models.anima import progress_reporting
 from backend.app.worker import pipeline_output
 
 
@@ -41,6 +41,7 @@ class AnimaProgressTests(unittest.TestCase):
         loop=AnimaDenoiseStep();loop.set_progress_bar_config(disable=True)
         class Pipe:
             memory_policy={'family':'anima'}
+            vae=SimpleNamespace(use_tiling=True,decode=lambda value:value)
             _blocks=loop
             def __call__(self,**arguments):
                 self.arguments=arguments

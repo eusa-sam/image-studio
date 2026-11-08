@@ -4,7 +4,7 @@ from unittest.mock import patch
 import torch
 from safetensors.torch import save_file
 from diffusers import Flux2KleinPipeline,Flux2Transformer2DModel
-from backend.app.lora import apply_loras
+from backend.app.inference.conditioning.lora import apply_loras
 
 class MetadataTests(unittest.TestCase):
     def pipeline(self):

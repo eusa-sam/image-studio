@@ -6,6 +6,7 @@
 # Internal project notes
 /AGENTS.md
 /docs/
+/.agents/
 
 # Python environments and generated files
 .venv/

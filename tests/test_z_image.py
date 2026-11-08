@@ -5,26 +5,26 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from backend.app import z_image
-from backend.app.pipeline_cache import PipelineCache
+from backend.app.inference.models import z_image
+from backend.app.inference.runtime.pipeline_cache import PipelineCache
 
 
 class ZImageBundleTests(unittest.TestCase):
     def test_calibrated_reserve_uses_current_free_memory_and_keeps_large_fallback(self):
         import torch
         from unittest.mock import Mock
-        from backend.app.memory_policy import configure_pipeline,residency_plan
+        from backend.app.inference.runtime.memory_policy import configure_pipeline, residency_plan
         gb=1024**3
         transformer=torch.nn.Module();transformer.register_parameter('weight',torch.nn.Parameter(torch.empty(6_150_000_000,device='meta',dtype=torch.bfloat16)))
         encoder=torch.nn.Module();encoder.register_parameter('weight',torch.nn.Parameter(torch.empty(4_000_000_000,device='meta',dtype=torch.bfloat16)))
         pipe=Mock();pipe.components={'transformer':transformer,'text_encoder':encoder}
         events=[]
-        with patch('torch.cuda.empty_cache',side_effect=lambda:events.append('release')),patch('backend.app.memory_policy.available_vram',side_effect=lambda:(events.append('measure') or (15*gb,32*gb,{}))),patch('backend.app.memory_policy.available_ram',return_value=32*gb):
+        with patch('torch.cuda.empty_cache',side_effect=lambda:events.append('release')),patch('backend.app.inference.runtime.memory_policy.available_vram',side_effect=lambda:(events.append('measure') or (15*gb,32*gb,{}))),patch('backend.app.inference.runtime.memory_policy.available_ram',return_value=32*gb):
             configure_pipeline(pipe,768,1024,activation_reserve_bytes=z_image.activation_reserve(768,1024))
         self.assertEqual(events,['release','measure'])
-        with patch('backend.app.memory_policy.available_ram',return_value=32*gb):
+        with patch('backend.app.inference.runtime.memory_policy.available_ram',return_value=32*gb):
             for free,expected in [(15*gb,'model_offload'),(13*gb,'sequential_offload'),(24*gb,'full')]:
-                with patch('backend.app.memory_policy.available_vram',return_value=(free,32*gb,{})):
+                with patch('backend.app.inference.runtime.memory_policy.available_vram',return_value=(free,32*gb,{})):
                     policy=configure_pipeline(pipe,1024,1024,activation_reserve_bytes=z_image.activation_reserve(1024,1024))
                 self.assertEqual(policy['mode'],expected)
         self.assertIsNone(z_image.activation_reserve(1024,1536))
@@ -66,16 +66,17 @@ class ZImageBundleTests(unittest.TestCase):
         from types import SimpleNamespace
         from unittest.mock import Mock
         pipe=SimpleNamespace(memory_policy=dict(family='zimage',mode='sequential_offload'),components={'transformer':torch.nn.Linear(2,2)},remove_all_hooks=Mock(),to=Mock())
+        pipe.transformer=pipe.components['transformer'];pipe.vae=torch.nn.Linear(2,2)
         cache=PipelineCache();cache.pipe=pipe;cache.key='z'
         cache.conditioning={'one':{'prompt_embeds':torch.ones(2,3)}}
-        with patch('backend.app.memory_policy.available_ram',return_value=16*1024**3),patch('backend.app.memory_policy.configure_pipeline',return_value={'mode':'model_offload'}):
+        with patch('backend.app.inference.runtime.memory_policy.available_ram',return_value=16*1024**3),patch('backend.app.inference.runtime.memory_policy.configure_pipeline',return_value={'mode':'model_offload'}):
             self.assertTrue(cache.suspend());self.assertIs(cache.pipe,pipe);self.assertEqual(cache.key,'z')
             z_image.resume_pipeline(pipe,768,1024)
             self.assertEqual(pipe.memory_policy,dict(mode='model_offload',family='zimage',text_encoder_released=True))
             pipe.text_encoder=torch.nn.Linear(2,2)
             z_image.resume_pipeline(pipe,768,1024)
             self.assertFalse(pipe.memory_policy['text_encoder_released'])
-        with patch('backend.app.memory_policy.available_ram',return_value=0):
+        with patch('backend.app.inference.runtime.memory_policy.available_ram',return_value=0):
             with self.assertRaisesRegex(RuntimeError,'RAM'):z_image.resume_pipeline(pipe,768,1024)
             self.assertFalse(cache.suspend());self.assertIsNone(cache.pipe)
 

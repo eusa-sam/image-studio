@@ -1,7 +1,7 @@
 import unittest
 from types import SimpleNamespace
 from unittest.mock import Mock,patch
-from backend.app.pipeline_cache import PipelineCache
+from backend.app.inference.runtime.pipeline_cache import PipelineCache
 
 
 class ResolutionReuseTests(unittest.TestCase):
@@ -15,7 +15,7 @@ class ResolutionReuseTests(unittest.TestCase):
                     plan={'runner':family+'_txt2img','model_path':'same','fingerprint':{'bytes':1}}
                     cache=PipelineCache();cache.pipe=pipe;cache.key=cache.identity(plan,(768,1024));cache.suspended=suspended
                     wanted=cache.identity(plan,(1024,1280))
-                    with patch('backend.app.memory_policy.available_ram',return_value=32*1024**3),patch('torch.cuda.empty_cache'):
+                    with patch('backend.app.inference.runtime.memory_policy.available_ram',return_value=32*1024**3),patch('torch.cuda.empty_cache'):
                         self.assertIs(cache.get(wanted,'same'),pipe)
                     self.assertTrue(cache.suspended);self.assertEqual(cache.key,wanted)
                     self.assertTrue(torch.equal(model.weight,before))
@@ -28,7 +28,7 @@ class ResolutionReuseTests(unittest.TestCase):
             plan={'runner':'sdxl_txt2img','model_path':'same','fingerprint':{'bytes':1}}
             cache.key=cache.identity(plan,(768,1024))
             if change!='ram':plan[change]={'changed':True} if change!='model_path' else 'different'
-            with patch('backend.app.memory_policy.available_ram',return_value=1),patch('torch.cuda.empty_cache'):
+            with patch('backend.app.inference.runtime.memory_policy.available_ram',return_value=1),patch('torch.cuda.empty_cache'):
                 self.assertIsNone(cache.get(cache.identity(plan,(1024,1280)),'same'))
             self.assertIsNone(cache.pipe)
 

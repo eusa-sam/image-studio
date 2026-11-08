@@ -35,6 +35,25 @@ class StreamingModel:
 
 
 class StreamTests(unittest.TestCase):
+    def test_gpu_choice_warns_on_cpu_placement_without_losing_response(self):
+        class CPUModel(StreamingModel):
+            async def stream_chat(self,body):
+                yield {'message':{},'_gpu_bytes':0}
+                async for chunk in super().stream_chat(body):yield chunk
+        async def run():
+            with tempfile.TemporaryDirectory() as root, SessionStore(root) as store:
+                session=store.create_session('placement')
+                queue=SimpleNamespace(gpu=threading.Lock(),suspend_image_model=lambda:None)
+                model=CPUModel();service=ChatService(store,queue,model)
+                body=ChatInput(session=session,request_id=uuid4(),prompt_id=uuid4(),expected_revision=0,
+                    model='test',message='hello',positive='',negative='',settings={'model':'image'})
+                events=[event async for event in service.stream(body)]
+                self.assertEqual(len([event for event in events if event.get('code')=='cpu_fallback']),1)
+                self.assertEqual(events[-1]['turn']['status'],'SUCCEEDED')
+                self.assertEqual(model.released,['test'])
+                self.assertFalse(queue.gpu.locked())
+        asyncio.run(run())
+
     def test_completion_write_failure_reports_error_and_preserves_recovery(self):
         async def run(prepared):
             with tempfile.TemporaryDirectory() as root, SessionStore(root) as store:

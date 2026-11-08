@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from backend.app import flux2
+from backend.app.inference.models import flux2
 
 
 class KleinBundleTests(unittest.TestCase):
@@ -26,7 +26,7 @@ class KleinBundleTests(unittest.TestCase):
         import torch
         from safetensors.torch import save_file
         from diffusers import Flux2KleinPipeline,Flux2Transformer2DModel
-        from backend.app.lora import apply_loras,set_lora_weights
+        from backend.app.inference.conditioning.lora import apply_loras, set_lora_weights
         transformer=Flux2Transformer2DModel(in_channels=8,num_layers=1,num_single_layers=1,
             attention_head_dim=16,num_attention_heads=2,joint_attention_dim=32,
             timestep_guidance_channels=32,axes_dims_rope=(4,4,4,4),guidance_embeds=False)
@@ -47,12 +47,13 @@ class KleinBundleTests(unittest.TestCase):
     def test_lora_loading_precedes_device_policy_and_is_never_fused(self):
         from types import SimpleNamespace
         from unittest.mock import Mock
-        pipe=SimpleNamespace();calls=[];selections=[({'weight':.4},Path('local.safetensors'))]
+        import torch
+        pipe=SimpleNamespace(transformer=torch.nn.Linear(2,2),vae=torch.nn.Linear(2,2));calls=[];selections=[({'weight':.4},Path('local.safetensors'))]
         def inject(actual,rows):
             self.assertIs(actual,pipe);self.assertIs(rows,selections);calls.append('lora')
         def configure(actual,width,height):
             self.assertEqual(calls,['lora']);self.assertEqual((width,height),(768,1024));return {}
-        with patch('diffusers.Flux2KleinPipeline.from_pretrained',return_value=pipe) as load,patch('backend.app.lora.apply_loras',side_effect=inject),patch('backend.app.memory_policy.configure_pipeline',side_effect=configure):
+        with patch('diffusers.Flux2KleinPipeline.from_pretrained',return_value=pipe) as load,patch('backend.app.inference.conditioning.lora.apply_loras',side_effect=inject),patch('backend.app.inference.runtime.memory_policy.configure_pipeline',side_effect=configure):
             self.assertIs(flux2.load_pipeline('local',768,1024,loras=selections),pipe)
             self.assertTrue(load.call_args.kwargs['local_files_only'])
             self.assertEqual(pipe.memory_policy['family'],'flux2')
@@ -74,7 +75,7 @@ class KleinBundleTests(unittest.TestCase):
 
     def test_worker_passes_verified_lora_files_and_cache_reuses_strength(self):
         from backend.app.worker import _run
-        from backend.app.pipeline_cache import PipelineCache
+        from backend.app.inference.runtime.pipeline_cache import PipelineCache
         class StopAfterLoad(Exception):pass
         loras=[({'weight':.7},Path('verified.safetensors'))]
         plan=dict(runner='flux2_txt2img',settings=dict(width=768,height=1024),loras=[dict(id='style',weight=.7)])
@@ -83,7 +84,7 @@ class KleinBundleTests(unittest.TestCase):
         self.assertEqual(key,PipelineCache.identity(plan,(768,1024)))
         with tempfile.TemporaryDirectory() as directory:
             path=Path(directory)/'request.json';path.write_text(json.dumps(dict(plan=plan)))
-            with patch('backend.app.worker.verify_inputs',return_value=(Path('bundle'),'hash',{},loras)),patch('torch.cuda.is_available',return_value=True),patch('torch.cuda.reset_peak_memory_stats'),patch('torch.cuda.empty_cache'),patch('backend.app.flux2.load_pipeline',side_effect=StopAfterLoad) as load:
+            with patch('backend.app.worker.verify_inputs',return_value=(Path('bundle'),'hash',{},loras)),patch('torch.cuda.is_available',return_value=True),patch('torch.cuda.reset_peak_memory_stats'),patch('torch.cuda.empty_cache'),patch('backend.app.inference.models.flux2.load_pipeline',side_effect=StopAfterLoad) as load:
                 with self.assertRaises(StopAfterLoad):_run(path)
                 load.assert_called_once_with(Path('bundle'),768,1024,loras=loras)
 
@@ -91,20 +92,21 @@ class KleinBundleTests(unittest.TestCase):
         import torch
         from types import SimpleNamespace
         from unittest.mock import Mock
-        from backend.app.pipeline_cache import PipelineCache
+        from backend.app.inference.runtime.pipeline_cache import PipelineCache
         module=torch.nn.Linear(4,4)
         pipe=SimpleNamespace(memory_policy=dict(family='flux2',mode='model_offload'),components={'transformer':module},remove_all_hooks=Mock(),to=Mock())
+        pipe.transformer=pipe.components['transformer'];pipe.vae=torch.nn.Linear(2,2)
         cache=PipelineCache();cache.pipe=pipe;cache.key='model-key';cache.positive='one'
         cache.conditioning={'one':{'prompt_embeds':torch.ones(2,4)}}
-        with patch('backend.app.memory_policy.available_ram',return_value=16*1024**3):
+        with patch('backend.app.inference.runtime.memory_policy.available_ram',return_value=16*1024**3):
             self.assertTrue(cache.suspend())
             self.assertIs(cache.pipe,pipe);self.assertEqual(cache.key,'model-key')
             pipe.remove_all_hooks.assert_called_once();pipe.to.assert_called_once_with('cpu')
-            with patch('backend.app.memory_policy.configure_pipeline',return_value={'mode':'sequential_offload'}) as configure:
+            with patch('backend.app.inference.runtime.memory_policy.configure_pipeline',return_value={'mode':'sequential_offload'}) as configure:
                 flux2.resume_pipeline(pipe,768,1024)
                 configure.assert_called_once_with(pipe,768,1024)
                 self.assertEqual(pipe.memory_policy,dict(mode='sequential_offload',family='flux2'))
-        with patch('backend.app.memory_policy.available_ram',return_value=0):
+        with patch('backend.app.inference.runtime.memory_policy.available_ram',return_value=0):
             with self.assertRaisesRegex(RuntimeError,'RAM'):flux2.resume_pipeline(pipe,768,1024)
             self.assertFalse(cache.suspend());self.assertIsNone(cache.pipe)
             self.assertEqual(pipe.remove_all_hooks.call_count,1)

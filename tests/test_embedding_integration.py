@@ -9,7 +9,7 @@ from safetensors.torch import save_file
 from fastapi.testclient import TestClient
 from backend.app.models import scan,preflight,Settings
 from backend.app.main import create_app
-from backend.app.pipeline_cache import PipelineCache
+from backend.app.inference.runtime.pipeline_cache import PipelineCache
 from backend.app.worker import verify_components
 
 

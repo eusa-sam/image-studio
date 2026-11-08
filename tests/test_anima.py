@@ -3,7 +3,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
-from backend.app.anima import verify_bundle,split_single_state
+from backend.app.inference.models.anima import verify_bundle, split_single_state
 from backend.app.models import preflight
 from unittest.mock import patch
 

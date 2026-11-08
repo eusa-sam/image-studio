@@ -1,7 +1,7 @@
 import unittest
 from types import SimpleNamespace
 import torch
-from backend.app.prompt_encoding import parse_weights,weighted_tokens,encode_weighted
+from backend.app.inference.conditioning.prompt_encoding import parse_weights, weighted_tokens, encode_weighted
 
 
 class Tokenizer:

@@ -9,7 +9,8 @@ def image_arguments(pipe, image, width, height, steps, strength, generator, *, m
     import numpy as np
     import torch
     from diffusers.utils.torch_utils import randn_tensor
-    from .quantized_weights import weight_readers
+    from backend.app.inference.quantization.quantized_weights import weight_readers
+    from backend.app.inference.runtime.execution import phase
     count=int(steps*strength)
     if not 0<strength<=1 or count<1:raise ValueError('Steps × strength must be at least one')
     sigmas=np.linspace(1.,1/steps,steps)[steps-count:]
@@ -17,7 +18,7 @@ def image_arguments(pipe, image, width, height, steps, strength, generator, *, m
     scheduler.set_timesteps(sigmas=sigmas,mu=1.15,device='cpu')
     sigma=float(scheduler.sigmas[0])
     device=pipe._execution_device
-    with torch.inference_mode(),weight_readers():
+    with torch.inference_mode(),weight_readers(),phase(pipe,'encode'):
         pixels=pipe.image_processor.preprocess(image,height=height,width=width).to(device=device,dtype=pipe.vae.dtype).unsqueeze(2)
         latent=pipe.vae.encode(pixels).latent_dist.mode()
         mean=torch.tensor(pipe.vae.config.latents_mean,device=device,dtype=latent.dtype).view(1,-1,1,1,1)
@@ -52,11 +53,11 @@ def prompt_arguments(pipe, positive, cache):
     """Reuse exact conditioning within one worker, including each detail target's prefix."""
     import torch
     if positive not in cache:
-        from .quantized_weights import weight_readers
+        from backend.app.inference.quantization.quantized_weights import weight_readers
         encoder=pipe.weight_maps[1] if getattr(pipe,'memory_policy',{}).get('mode')=='partial' else None
         try:
             if encoder is not None:
-                from .memory_policy import available_vram
+                from backend.app.inference.runtime.memory_policy import available_vram
                 reusable=max(0,torch.cuda.memory_reserved()-torch.cuda.memory_allocated())
                 encoder.transient_gpu_budget=max(0,available_vram()[0]+reusable-2*1024**3)
             with torch.inference_mode(),weight_readers():
@@ -69,8 +70,9 @@ def prompt_arguments(pipe, positive, cache):
 
 def partial_cache_budgets(pipe,policy):
     maps=pipe.weight_maps
-    vae_cache=min(policy['cpu_cache_budget_bytes'],sum(p.numel()*p.element_size() for p in pipe.vae.parameters()))
-    maps[0].limit_cpu_cache(policy['cpu_cache_budget_bytes']-vae_cache)
+    cpu_budget=max(0,policy['cpu_cache_budget_bytes']-sum(getattr(mapping,'extra_cpu_bytes',0) for mapping in maps))
+    vae_cache=min(cpu_budget,sum(p.numel()*p.element_size() for p in pipe.vae.parameters()))
+    maps[0].limit_cpu_cache(cpu_budget-vae_cache)
     maps[2].limit_cpu_cache(vae_cache)
     vae_gpu=min(vae_cache,policy['resident_budget_bytes'])
     maps[0].budget=policy['resident_budget_bytes']-vae_gpu
@@ -81,10 +83,11 @@ def partial_cache_budgets(pipe,policy):
 
 def resume_pipeline(pipe,resolution):
     import torch
-    from .memory_policy import available_vram,available_ram,residency_plan
+    from backend.app.inference.runtime.memory_policy import available_vram, available_ram, residency_plan
     torch.cuda.empty_cache()
     free,total,measurement=available_vram();host=available_ram()
-    retained=sum(mapping.cpu_bytes for mapping in pipe.weight_maps)
+    from backend.app.inference.runtime.memory_policy import cached_storage_bytes
+    retained=cached_storage_bytes(pipe,'cpu')
     policy=residency_plan(free,total,pipe.memory_policy['weight_bytes'],*resolution,free_ram=host+retained)
     policy.update(mode='partial',measurement=measurement,free_ram_bytes=host)
     partial_cache_budgets(pipe,policy)
@@ -95,7 +98,7 @@ def resume_pipeline(pipe,resolution):
 def count_prompt_tokens(positive, negative, tokenizer=None):
     if tokenizer is None:
         from transformers import AutoTokenizer
-        from .models import MODEL_ROOT
+        from backend.app.models import MODEL_ROOT
         tokenizer=AutoTokenizer.from_pretrained(MODEL_ROOT/'configs/krea2/tokenizer',local_files_only=True)
     prefix='<|im_start|>system\nDescribe the image by detailing the color, shape, size, texture, quantity, text, spatial relationships of the objects and background:<|im_end|>\n<|im_start|>user\n'
     count=max(0,len(tokenizer(prefix+positive)['input_ids'])-34)
@@ -130,8 +133,8 @@ def prepare_encoder(path, config_root, positive):
     from accelerate import cpu_offload
     from transformers import AutoTokenizer, Qwen3VLConfig, Qwen3VLModel
     from diffusers import Krea2Pipeline
-    from .quantized_weights import FileWeights,weight_readers
-    from .memory_policy import available_vram,weight_validation_device
+    from backend.app.inference.quantization.quantized_weights import FileWeights, weight_readers
+    from backend.app.inference.runtime.memory_policy import available_vram, weight_validation_device
     # Larger GPUs retain the existing full-residency loading path.
     if available_vram()[1]>=32*1024**3:return None
     root=verify_config(config_root)
@@ -148,6 +151,8 @@ def prepare_encoder(path, config_root, positive):
         if device=='cuda:0':torch.cuda.empty_cache()
         mapping.bind(text)
         cpu_offload(text,torch.device('cuda:0'),state_dict=mapping,offload_buffers=len(text._parameters)>0)
+        from backend.app.inference.ops.native_fp8 import attach_native_linear
+        attach_native_linear(text,mapping)
         tokenizer=AutoTokenizer.from_pretrained(root/'tokenizer',local_files_only=True)
         temporary=Krea2Pipeline(transformer=None,text_encoder=text,vae=None,tokenizer=tokenizer,scheduler=None,is_distilled=True)
         temporary.weight_maps=[None,mapping]
@@ -161,7 +166,7 @@ def load_pipeline(checkpoint, text_encoder, vae_path, config_root, *, adaptive=F
     from transformers import AutoTokenizer, Qwen3VLConfig, Qwen3VLModel
     from diffusers import Krea2Pipeline, Krea2Transformer2DModel, AutoencoderKLQwenImage, FlowMatchEulerDiscreteScheduler
     from diffusers.loaders.single_file_utils import convert_krea2_transformer_checkpoint_to_diffusers, convert_wan_vae_to_diffusers
-    from .quantized_weights import load_local_weights
+    from backend.app.inference.quantization.quantized_weights import load_local_weights
     root=verify_config(config_root)
     if prepared_encoder is not None and not adaptive:raise ValueError('Prepared encoder requires adaptive loading')
     with torch.device('meta'):
@@ -175,7 +180,7 @@ def load_pipeline(checkpoint, text_encoder, vae_path, config_root, *, adaptive=F
     sources=[(transformer,checkpoint,convert_krea2_transformer_checkpoint_to_diffusers),
              (text,text_encoder,text_keys),(vae,vae_path,convert_wan_vae_to_diffusers)]
     maps=[]
-    from .memory_policy import available_ram,int8_preload_budget
+    from backend.app.inference.runtime.memory_policy import available_ram, int8_preload_budget
     preload_budget=int8_preload_budget(checkpoint,available_ram()) if adaptive and not experimental_int8_gpu else 0
     validation_devices={}
     for model,path,convert in sources:
@@ -184,9 +189,9 @@ def load_pipeline(checkpoint, text_encoder, vae_path, config_root, *, adaptive=F
             validation_devices[type(text).__name__]=prepared_encoder[4]
             continue
         if adaptive:
-            from .quantized_weights import FileWeights
+            from backend.app.inference.quantization.quantized_weights import FileWeights
             from safetensors import safe_open
-            from .memory_policy import available_vram,weight_validation_device
+            from backend.app.inference.runtime.memory_policy import available_vram, weight_validation_device
             with safe_open(str(path),framework='pt',device='cpu') as reader:
                 has_int8=any(reader.get_slice(key).get_dtype()=='I8' for key in reader.keys())
             # INT8 GPU rounding is enabled only by the caller after quality validation.
@@ -203,8 +208,8 @@ def load_pipeline(checkpoint, text_encoder, vae_path, config_root, *, adaptive=F
     pipe=Krea2Pipeline(transformer=transformer,text_encoder=text,vae=vae,tokenizer=tokenizer,
                       scheduler=scheduler,is_distilled=True)
     if adaptive:
-        from .lora import apply_loras
-        from .memory_policy import residency_plan,available_vram,available_ram
+        from backend.app.inference.conditioning.lora import apply_loras
+        from backend.app.inference.runtime.memory_policy import residency_plan, available_vram, available_ram
         from accelerate import cpu_offload
         # Diffusers otherwise detaches the already active encoder offload hooks.
         if prepared_encoder is not None:pipe.register_modules(text_encoder=None)
@@ -216,7 +221,9 @@ def load_pipeline(checkpoint, text_encoder, vae_path, config_root, *, adaptive=F
         host_free=available_ram()
         retained=sum(mapping.cpu_bytes for mapping in maps)
         policy=residency_plan(free,total,weights,*resolution,free_ram=host_free+retained)
+        if any(mapping.packed_sources for mapping in maps):policy['mode']='partial'
         policy.update(free_ram_bytes=host_free,preloaded_cpu_bytes=retained)
+        policy['family']='krea2'
         policy['measurement']=measurement
         policy['validation_devices']=validation_devices
         policy['packed_int8_gpu']=experimental_int8_gpu
@@ -236,10 +243,16 @@ def load_pipeline(checkpoint, text_encoder, vae_path, config_root, *, adaptive=F
                 if model is text and prepared_encoder is not None:continue
                 cpu_offload(model,torch.device('cuda:0'),state_dict=mapping,
                             offload_buffers=len(model._parameters)>0)
+                from backend.app.inference.ops.native_fp8 import attach_native_linear
+                attach_native_linear(model,mapping)
             if experimental_int8_gpu:
-                from .native_int8 import attach_native_linear
+                from backend.app.inference.ops.native_int8 import attach_native_linear
                 attach_native_linear(transformer,maps[0])
                 policy['int8_compute']='native_convrot_with_bf16_fallback'
+            policy['fp8_compute']='scaled_mm_dynamic_input_with_bf16_fallback'
+        if loras:
+            from backend.app.inference.models.krea2_lora import skip_unit_scaling
+            skip_unit_scaling(transformer)
         pipe.memory_policy=policy
         pipe.weight_maps=maps
     return pipe

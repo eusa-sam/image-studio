@@ -424,6 +424,8 @@ class ChatService:
             content = ''
             complete = False
             async for chunk in self.ollama.stream_chat(request):
+                if body.device == 'gpu' and chunk.get('_gpu_bytes') == 0:
+                    yield {'type':'status','code':'cpu_fallback','text':'GPU를 선택했지만 Ollama가 CPU로 실행 중입니다. 응답이 느릴 수 있어요.'}
                 message = chunk.get('message',{})
                 if not isinstance(message,dict) or not isinstance(message.get('content',''),str):
                     raise OllamaError('잘못된 대화 스트림 형식입니다.')

@@ -44,7 +44,7 @@ def validated_embeddings(selections, family, tokenizers):
 
 
 def embedding_tokenizers(family, selections):
-    from .prompt_tokens import tokenizers
+    from backend.app.inference.conditioning.prompt_tokens import tokenizers
     original=tokenizers(family)
     prepared=validated_embeddings(selections,family,original)
     result=copy.deepcopy(original)

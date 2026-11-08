@@ -1,4 +1,4 @@
-"""Restore scaled FP8 and rotated INT8 without rewriting source weights."""
+"""Keep validated quantized weights packed, with bounded compute-dtype fallback."""
 import json
 import torch
 from collections.abc import Mapping
@@ -65,6 +65,8 @@ def quantization(reader,name,tensor):
     if config.get('format')=='float8_e4m3fn':
         if set(config)-{'format','full_precision_matrix_mult'} or tensor.dtype!=torch.float8_e4m3fn or tensor.ndim!=2 or scale.numel()!=1:
             raise ValueError('Unsupported FP8 format/options')
+        if type(config.get('full_precision_matrix_mult',False)) is not bool:
+            raise ValueError('Invalid full_precision_matrix_mult')
     elif config.get('format')=='int8_tensorwise':
         if set(config)!={'format','convrot','convrot_groupsize'} or config['convrot'] is not True or tensor.dtype!=torch.int8 or tensor.ndim!=2 or scale.shape!=(tensor.shape[0],1):
             raise ValueError('Unsupported INT8 format/options')
@@ -132,8 +134,14 @@ class FileWeights(Mapping):
         self.stamp = self._stamp()
         self.sources, self.extra, self.cache = {}, {}, {}
         self.extra_gpu = {}
+        self.extra_cpu_bytes=0
         self.file_views=set()
         self.packed_sources={}
+        self.full_precision_sources=set()
+        self.native_fp8_sources=set()
+        self.fp8_hits=0
+        self.fp8_layers={}
+        self.fp8_fallbacks=0
         self.packed_cache={}
         self.packed_enabled=False
         self.packed_int8_enabled=False
@@ -197,6 +205,9 @@ class FileWeights(Mapping):
                 if int8:
                     if config is None:config=json.loads(bytes(reader.get_tensor(key.removesuffix('.weight')+'.comfy_quant').tolist()))
                     self.packed_sources[name]=(expected[name].numel(),key.removesuffix('.weight')+'.weight_scale',config['convrot_groupsize'],expected[name].shape[0])
+                elif name in self.packed_sources:
+                    if config is None:config=json.loads(bytes(reader.get_tensor(key.removesuffix('.weight')+'.comfy_quant').tolist()))
+                    if config.get('full_precision_matrix_mult',False):self.full_precision_sources.add(name)
                 # PEFT needs CPU device/dtype during injection, not materialized base weights.
                 placeholder=torch.zeros((),dtype=target_dtype).expand(expected[name].shape)
                 placeholders[name]=placeholder
@@ -214,42 +225,61 @@ class FileWeights(Mapping):
         return tensor
 
     def bind(self, model):
-        sources,cache,views,packed,native={},{},set(),{},{}
+        # PEFT inserts/removes base_layer in names; cache ownership follows the original layer.
+        dictionaries=('sources','cache','packed_sources','native_cpu_cache','packed_cache')
+        previous={field:{name.replace('.base_layer.','.'):value for name,value in getattr(self,field).items()} for field in dictionaries}
+        sets={field:{name.replace('.base_layer.','.') for name in getattr(self,field)} for field in ('file_views','full_precision_sources')}
+        rebound={field:{} for field in dictionaries};renamed={field:set() for field in sets};extra={}
         for name,value in model.state_dict().items():
             original=name.replace('.base_layer.','.')
-            if original in self.sources:
-                sources[name]=self.sources[original]
-                if original in self.cache:cache[name]=self.cache[original]
-                if original in self.file_views:views.add(name)
-                if original in self.packed_sources:packed[name]=self.packed_sources[original]
-                if original in self.native_cpu_cache:native[name]=self.native_cpu_cache[original]
-            elif not value.is_meta:self.extra[name]=value
+            if original in previous['sources']:
+                for field,values in previous.items():
+                    if original in values:rebound[field][name]=values[original]
+                for field,values in sets.items():
+                    if original in values:renamed[field].add(name)
+            elif not value.is_meta:extra[name]=value
             else:raise ValueError('Uninitialized adapter: '+name)
-        if len(sources)!=len(self.sources):raise ValueError('Lost base weights during adapter injection')
-        self.sources=sources
-        self.cache=cache
-        self.file_views=views
-        self.packed_sources=packed
-        self.native_cpu_cache=native
+        if len(rebound['sources'])!=len(self.sources):raise ValueError('Lost base weights during adapter injection')
+        for field,value in (rebound|renamed).items():setattr(self,field,value)
+        self.extra=extra;self.extra_gpu.clear();self.native_fp8_sources.clear()
+        self.transfer_following={}
+        self.extra_cpu_bytes=sum({value.untyped_storage().data_ptr():value.untyped_storage().nbytes() for value in extra.values()}.values())
+        self.cache_bytes=sum(value.numel()*value.element_size() for value in self.cache.values() if value.is_cuda)
+        self.cache_bytes+=sum(value.numel()*value.element_size() for values in self.packed_cache.values() for value in values[:2])
 
     def limit_cpu_cache(self, budget):
         self.cpu_budget=budget
+        derived=getattr(self,'derived_cpu_cache',{})
+        retained=sum(v.numel()*v.element_size() for values in derived.values() for v in values[:2])
+        for key in list(derived):
+            if self.cpu_bytes+retained<=budget:break
+            retained-=sum(v.numel()*v.element_size() for v in derived.pop(key)[:2])
+        self.derived_cpu_bytes=retained
         for name in list(self.cache):
-            if self.cpu_bytes<=budget:break
+            if self.cpu_bytes+retained<=budget:break
             tensor=self.cache[name]
             if tensor.device.type=='cpu':
                 self.cpu_bytes-=tensor.numel()*tensor.element_size()
                 del self.cache[name]
         for name in list(self.native_cpu_cache):
-            if self.cpu_bytes<=budget:break
+            if self.cpu_bytes+retained<=budget:break
             self.cpu_bytes-=sum(v.numel()*v.element_size() for v in self.native_cpu_cache.pop(name))
 
+    def clear_cache(self):
+        self.cache.clear();self.native_cpu_cache.clear();self.packed_cache.clear();self.extra_gpu.clear()
+        for name in ('derived_cpu_cache','derived_gpu_cache'):getattr(self,name,{}).clear()
+        getattr(self,'transfer_following',{}).clear()
+        self.derived_cpu_bytes=self.derived_gpu_bytes=0
+        self.cache_bytes=self.cpu_bytes=0
+
     def offload_cache(self):
-        from .memory_policy import available_ram
+        from backend.app.inference.runtime.memory_policy import available_ram
         self.extra_gpu.clear()
+        getattr(self,'derived_gpu_cache',{}).clear()
+        self.derived_gpu_bytes=0
         for name,(raw,scale,group) in list(self.packed_cache.items()):
             size=raw.numel()*raw.element_size()+scale.numel()*scale.element_size()
-            if self.cpu_bytes+size<=self.cpu_budget and available_ram()>=8*1024**3+size:
+            if self.cpu_bytes+size<=self.cpu_budget and available_ram()>=8*1024**3+size and self._allocation_fits(cpu=size):
                 self.native_cpu_cache[name]=(raw.cpu(),scale.cpu())
                 self.cpu_bytes+=size
         self.packed_cache.clear()
@@ -262,13 +292,17 @@ class FileWeights(Mapping):
 
     def _cache_cpu(self,name,tensor,*,reserve=8*1024**3):
         size=tensor.numel()*tensor.element_size()
-        if self.cpu_bytes+size<=self.cpu_budget:
-            from .memory_policy import available_ram
+        if self.cpu_bytes+size<=self.cpu_budget and self._allocation_fits(cpu=size):
+            from backend.app.inference.runtime.memory_policy import available_ram
             if available_ram()>=reserve+size:
                 # A safetensors view can otherwise retain the mapping of the entire source file.
                 tensor=tensor.cpu()
                 self.cache[name]=tensor.clone() if name in self.file_views else tensor
                 self.cpu_bytes+=size
+
+    def _allocation_fits(self,**allocation):
+        check=getattr(self,'shared_budget',None)
+        return check is None or check(**allocation)
 
     def __iter__(self):return iter(self.sources.keys() | self.extra.keys())
     def __len__(self):return len(self.sources)+len(self.extra)
@@ -280,6 +314,8 @@ class FileWeights(Mapping):
                     packed_fp8_tensors=sum(weight.dtype==torch.float8_e4m3fn for weight,_,_ in self.packed_cache.values()),
                     packed_int8_tensors=sum(weight.dtype==torch.int8 for weight,_,_ in self.packed_cache.values()),packed_hits=self.packed_hits,fused_int8_hits=self.fused_hits,
                     transient_gpu_reads=self.transient_gpu_reads,native_int8_linear_hits=self.native_hits,
+                    native_fp8_linear_hits=self.fp8_hits,native_fp8_layers=dict(sorted(self.fp8_layers.items())),
+                    fp8_fallback_calls=self.fp8_fallbacks,full_precision_layers=sorted(self.full_precision_sources),
                     int8_bound_validations=self.int8_bound_validations,
                     fp8_bound_validations=self.fp8_bound_validations,
                     native_cpu_bytes=sum(v.numel()*v.element_size() for pair in self.native_cpu_cache.values() for v in pair),
@@ -288,13 +324,18 @@ class FileWeights(Mapping):
     def linear_packed(self,name,device):
         if self._stamp()!=self.stamp:raise ValueError('COMPONENT_CHANGED during native inference')
         if name in self.packed_cache:return self.packed_cache[name]
-        if self._pack(name):return self.packed_cache[name]
+        if self._pack(name,native=name in self.native_fp8_sources):return self.packed_cache[name]
         key,_=self.sources[name]
         _,scale_name,group,_=self.packed_sources[name]
-        if name in self.native_cpu_cache:raw,scale=self.native_cpu_cache[name]
+        if name in self.native_cpu_cache:
+            raw,scale=self.native_cpu_cache[name]
+            result=(raw.to(device),scale.to(device),group)
         else:
             with open_weights(self.path) as reader:
-                raw,scale=self._checked_raw(name,reader.get_tensor(key)),reader.get_tensor(scale_name)
+                raw,scale=reader.get_tensor(key),reader.get_tensor(scale_name)
+            result=(raw.to(device),scale.to(device),group)
+            # Validate on the compute device before publishing or using the raw weights.
+            self._checked_raw(name,result[0])
             previous=self.cache.pop(name,None)
             if previous is not None:
                 size=previous.numel()*previous.element_size()
@@ -302,12 +343,12 @@ class FileWeights(Mapping):
                 else:self.cache_bytes-=size
             del previous
             size=raw.numel()*raw.element_size()+scale.numel()*scale.element_size()
-            from .memory_policy import available_ram
-            if self.cpu_bytes+size<=self.cpu_budget and available_ram()>=8*1024**3+size:
+            from backend.app.inference.runtime.memory_policy import available_ram
+            if self.cpu_bytes+size<=self.cpu_budget and available_ram()>=8*1024**3+size and self._allocation_fits(cpu=size):
                 raw,scale=raw.clone(),scale.clone()
                 self.native_cpu_cache[name]=(raw,scale)
                 self.cpu_bytes+=size
-        result=(raw.to(device),scale.to(device),group)
+                if result[0].device.type=='cpu':result=(raw,scale,group)
         if self._stamp()!=self.stamp:raise ValueError('COMPONENT_CHANGED during native transfer')
         return result
 
@@ -315,7 +356,7 @@ class FileWeights(Mapping):
         weight,scale,group=self.packed_cache[name]
         key,dtype=self.sources[name]
         if group and dtype==torch.bfloat16:
-            from .cuda_decode import decode_int8
+            from backend.app.inference.ops.cuda_decode import decode_int8
             restored=decode_int8(weight,scale,group)
             if restored is not None:
                 self.fused_hits+=1
@@ -324,13 +365,15 @@ class FileWeights(Mapping):
         restored=restored.to(dtype)
         return next(iter(self.convert({key:restored}).values()))
 
-    def _pack(self,name):
+    def _pack(self,name,*,native=False):
         if not self.packed_enabled or name not in self.packed_sources:return False
         elements,scale_name,group,scale_elements=self.packed_sources[name]
         if group and not self.packed_int8_enabled:return False
         size=elements+4*scale_elements
         if self.cache_bytes+size>self.budget:return False
-        if allocator_free_bytes()<self.reserve+size+elements*(16 if group else 10):return False
+        temporary=0 if native else elements*(16 if group else 10)
+        if allocator_free_bytes()<self.reserve+size+temporary:return False
+        if not self._allocation_fits(gpu=size,temporary=temporary):return False
         if name in self.native_cpu_cache:
             weight,scale=(value.to('cuda') for value in self.native_cpu_cache[name])
         else:
@@ -338,11 +381,14 @@ class FileWeights(Mapping):
             with open_weights(self.path) as reader:
                 weight=reader.get_tensor(key).to('cuda')
                 scale=reader.get_tensor(scale_name).to('cuda')
-        self._checked_raw(name,weight)
+            self._checked_raw(name,weight)
         self.packed_cache[name]=(weight,scale,group)
         self.cache_bytes+=size
         previous=self.cache.pop(name,None)
-        if previous is not None:self.cpu_bytes-=previous.numel()*previous.element_size()
+        if previous is not None:
+            old_size=previous.numel()*previous.element_size()
+            if previous.is_cuda:self.cache_bytes-=old_size
+            else:self.cpu_bytes-=old_size
         previous_raw=self.native_cpu_cache.pop(name,None)
         if previous_raw is not None:self.cpu_bytes-=sum(v.numel()*v.element_size() for v in previous_raw)
         return True
@@ -353,7 +399,7 @@ class FileWeights(Mapping):
             if name in self.extra_gpu:return self.extra_gpu[name]
             tensor=self.extra[name]
             size=tensor.numel()*tensor.element_size()
-            if self.cache_bytes+size<=self.budget and allocator_free_bytes()>=self.reserve+size:
+            if self.cache_bytes+size<=self.budget and allocator_free_bytes()>=self.reserve+size and self._allocation_fits(gpu=size):
                 self.extra_gpu[name]=tensor.to('cuda')
                 self.cache_bytes+=size
                 return self.extra_gpu[name]
@@ -384,7 +430,7 @@ class FileWeights(Mapping):
                 self.transient_gpu_reads+=1
                 return tensor
         size=tensor.numel()*tensor.element_size()
-        if self.cache_bytes+size<=self.budget and allocator_free_bytes()>=self.reserve+size:
+        if self.cache_bytes+size<=self.budget and allocator_free_bytes()>=self.reserve+size and self._allocation_fits(gpu=size):
             tensor=tensor.to('cuda')
             self.cache[name]=tensor
             self.cache_bytes+=size

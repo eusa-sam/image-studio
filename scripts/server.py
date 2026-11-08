@@ -16,6 +16,22 @@ from filelock import FileLock, Timeout
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def default_port():
+    if os.environ.get('IMAGE_STUDIO_CONTAINER') == '1':
+        return 8765
+    value = '8765'
+    path = ROOT / '.env'
+    if path.exists():
+        for line in path.read_text(encoding='utf-8-sig').splitlines():
+            key, separator, setting = line.partition('=')
+            if separator and key.strip() == 'IMAGE_STUDIO_PORT':
+                value = setting.split('#', 1)[0].strip().strip('\"\'')
+    value = os.environ.get('IMAGE_STUDIO_PORT', value)
+    if not value.isascii() or not value.isdecimal() or not 1 <= int(value) <= 65535:
+        raise ValueError('IMAGE_STUDIO_PORT must be an integer from 1 to 65535')
+    return int(value)
+
+
 def write(path, value):
     with FileLock(str(path)+'.lock', timeout=5):
         temporary = path.with_suffix('.tmp')
@@ -60,7 +76,7 @@ def status(runtime):
 async def serve(run, data_root, port):
     import uvicorn
     from backend.app.main import create_app
-    server = uvicorn.Server(uvicorn.Config(create_app(data_root), host='127.0.0.1', port=port,
+    server = uvicorn.Server(uvicorn.Config(create_app(data_root, port=port), host='127.0.0.1', port=port,
                                           access_log=False, timeout_graceful_shutdown=10))
     with FileLock(run / 'alive.lock', timeout=0):
         write(run / 'state.json', {'state': 'starting', 'pid': os.getpid(), 'port': port})
@@ -136,11 +152,15 @@ def main():
     parser.add_argument('action', choices=('start', 'status', 'stop', '_serve'))
     parser.add_argument('--runtime', type=Path, default=ROOT / 'data/runtime/server')
     parser.add_argument('--data-root', type=Path, default=ROOT / 'data')
-    parser.add_argument('--port', type=int, default=8765)
+    parser.add_argument('--port', type=int)
     parser.add_argument('--run-id')
     args = parser.parse_args()
     runtime, data_root = args.runtime.resolve(), args.data_root.resolve()
     try:
+        if args.action in ('start', '_serve'):
+            args.port = args.port if args.port is not None else default_port()
+            if not 1 <= args.port <= 65535:
+                raise ValueError('Port must be from 1 to 65535')
         if args.action == '_serve':
             run = runtime / str(UUID(args.run_id))
             if run != current(runtime):

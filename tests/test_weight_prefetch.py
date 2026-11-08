@@ -5,13 +5,26 @@ from types import SimpleNamespace
 from unittest.mock import patch
 import torch
 from safetensors.torch import save_file
-from backend.app.weight_prefetch import prefetch_weights
+from backend.app.inference.quantization.weight_prefetch import prefetch_weights
 
 class WeightPrefetchTests(unittest.TestCase):
+    @patch('backend.app.inference.quantization.weight_prefetch.available_ram',return_value=16*1024**3)
+    def test_fp8_prefetch_checks_deferred_values_before_publication(self,ram):
+        with tempfile.TemporaryDirectory() as folder:
+            pipe,_=self.make_pipe(folder);mapping=pipe.weight_maps[0]
+            mapping.packed_sources['0.weight']=(256,'0.scale',None,1)
+            mapping.native_fp8_sources={'0.weight'}
+            mapping._checked_raw=lambda *args:(_ for _ in ()).throw(ValueError('Nonfinite tensor'))
+            with self.assertRaisesRegex(ValueError,'Nonfinite'):
+                with prefetch_weights(pipe):mapping.linear_packed('0.weight','cpu')
+            self.assertFalse(mapping.native_cpu_cache)
+            self.assertNotIn('linear_packed',vars(mapping))
+
     def make_pipe(self,folder):
         model=torch.nn.Sequential(torch.nn.Linear(16,16,bias=False),torch.nn.Linear(16,16,bias=False))
         for module in model:module._old_forward=module.forward
         class Mapping:
+            def _allocation_fits(self,**allocation):return True
             def _stamp(self):return self.path.stat().st_mtime_ns
             def linear_packed(self,name,device):
                 if self._stamp()!=self.stamp:raise ValueError('COMPONENT_CHANGED')
@@ -27,7 +40,7 @@ class WeightPrefetchTests(unittest.TestCase):
         mapping.native_cpu_cache={};mapping.packed_cache={};mapping.cpu_budget=1024;mapping.cpu_bytes=0
         return SimpleNamespace(transformer=model,weight_maps=[mapping]),tensors
 
-    @patch('backend.app.weight_prefetch.available_ram',return_value=16*1024**3)
+    @patch('backend.app.inference.quantization.weight_prefetch.available_ram',return_value=16*1024**3)
     def test_exact_compressed_cache_and_warm_call_without_executor(self,ram):
         with tempfile.TemporaryDirectory() as folder:
             pipe,tensors=self.make_pipe(folder);mapping=pipe.weight_maps[0]
@@ -38,18 +51,18 @@ class WeightPrefetchTests(unittest.TestCase):
                     self.assertTrue(torch.equal(scale,tensors[f'{i}.scale']))
             self.assertEqual(mapping.cpu_bytes,640)
             self.assertNotIn('linear_packed',vars(mapping))
-            with patch('backend.app.weight_prefetch.ThreadPoolExecutor',side_effect=AssertionError('warm read')):
+            with patch('backend.app.inference.quantization.weight_prefetch.ThreadPoolExecutor',side_effect=AssertionError('warm read')):
                 with prefetch_weights(pipe):pass
 
     def test_ram_budget_and_cpu_cache_budget_do_not_preload(self):
         for ram,budget in [(7*1024**3,1024),(16*1024**3,0)]:
             with self.subTest(ram=ram,budget=budget),tempfile.TemporaryDirectory() as folder:
                 pipe,_=self.make_pipe(folder);mapping=pipe.weight_maps[0];mapping.cpu_budget=budget
-                with patch('backend.app.weight_prefetch.available_ram',return_value=ram),patch('backend.app.weight_prefetch.safe_open',side_effect=AssertionError('read')):
+                with patch('backend.app.inference.quantization.weight_prefetch.available_ram',return_value=ram),patch('backend.app.inference.quantization.weight_prefetch.safe_open',side_effect=AssertionError('read')):
                     with prefetch_weights(pipe):self.assertIsNone(mapping.linear_packed('0.weight','cpu'))
                 self.assertEqual(mapping.cpu_bytes,0)
 
-    @patch('backend.app.weight_prefetch.available_ram',return_value=16*1024**3)
+    @patch('backend.app.inference.quantization.weight_prefetch.available_ram',return_value=16*1024**3)
     def test_changed_source_and_body_exception_restore_override(self,ram):
         with tempfile.TemporaryDirectory() as folder:
             pipe,_=self.make_pipe(folder);mapping=pipe.weight_maps[0]
@@ -66,19 +79,19 @@ class WeightPrefetchTests(unittest.TestCase):
     def test_failed_scheduling_restores_override(self):
         with tempfile.TemporaryDirectory() as folder:
             pipe,_=self.make_pipe(folder);mapping=pipe.weight_maps[0]
-            with patch('backend.app.weight_prefetch.available_ram',side_effect=RuntimeError('memory probe')),self.assertRaisesRegex(RuntimeError,'memory probe'):
+            with patch('backend.app.inference.quantization.weight_prefetch.available_ram',side_effect=RuntimeError('memory probe')),self.assertRaisesRegex(RuntimeError,'memory probe'):
                 with prefetch_weights(pipe):pass
             self.assertNotIn('linear_packed',vars(mapping))
 
     def test_ram_drop_discards_prefetch_before_cache_publication(self):
         with tempfile.TemporaryDirectory() as folder:
             pipe,_=self.make_pipe(folder);mapping=pipe.weight_maps[0]
-            with patch('backend.app.weight_prefetch.available_ram',side_effect=[16*1024**3,7*1024**3,7*1024**3]):
+            with patch('backend.app.inference.quantization.weight_prefetch.available_ram',side_effect=[16*1024**3,7*1024**3,7*1024**3]):
                 with prefetch_weights(pipe):self.assertIsNone(mapping.linear_packed('0.weight','cpu'))
             self.assertFalse(mapping.native_cpu_cache)
             self.assertEqual(mapping.cpu_bytes,0)
 
-    @patch('backend.app.weight_prefetch.available_ram',return_value=16*1024**3)
+    @patch('backend.app.inference.quantization.weight_prefetch.available_ram',return_value=16*1024**3)
     def test_change_during_read_is_not_published(self,ram):
         with tempfile.TemporaryDirectory() as folder:
             pipe,_=self.make_pipe(folder);mapping=pipe.weight_maps[0]

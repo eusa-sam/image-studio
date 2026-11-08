@@ -195,7 +195,7 @@ export function setupChat({api, getContext, apply, isWorkspaceReady=()=>true, do
     $('refresh-llm').disabled=!!active || modelLoading;
     $('llm-output').disabled=!!active;$('llm-context').disabled=!!active;
     for(const key of [...advancedFields,'options'])$('llm-'+key).disabled=!!active;
-    $('chat-model-name').textContent=$('llm-model').value || '모델 연결 중';
+    $('chat-model-name').textContent=$('llm-model').value || (modelLoading?'모델 연결 중':'대화 모델을 연결해 주세요');
   }
   function imagePreview(image) {
     const link=doc.createElement('a');link.className='chat-image-preview';link.href=image.src;
@@ -348,7 +348,7 @@ export function setupChat({api, getContext, apply, isWorkspaceReady=()=>true, do
       $('chat-history').append(empty);
     }
     historyReady=true;if(stick)bottom();controls();
-    if(changed&&!active)status('이어서 이야기해 주세요.');
+    if(!active && $('llm-status').textContent==='대화 기록을 불러오는 중…')status('이어서 이야기해 주세요.');
   }
   $('chat-older').onclick=async()=>{
     if(olderLoading || active || !historyReady || !historyCursor)return;
@@ -387,14 +387,15 @@ export function setupChat({api, getContext, apply, isWorkspaceReady=()=>true, do
       if(epoch!==modelEpoch)return;
       modelVision=info.capabilities.includes('vision');
       const values=info.thinking?.values || [];
+      const thinkingLabel=value=>value===false?'끄기':value===true?'켜기':value;
       $('llm-think').replaceChildren(...[null,...values].map(value=>{
         const option=doc.createElement('option');option.value=JSON.stringify(value);
-        option.textContent=value===null ? '모델 기본값'+(info.thinking?.default!=null ? ' ('+JSON.stringify(info.thinking.default)+')':'') : value===false?'끄기':value===true?'켜기':value;
+        option.textContent=value===null ? '모델 기본값'+(info.thinking?.default!=null ? ' ('+thinkingLabel(info.thinking.default)+')':'') : thinkingLabel(value);
         return option;
       }));
       let selected='null';try {selected=localStorage.getItem('image-maker.think.'+name)||'null';}catch{}
       $('llm-think').value=[...$('llm-think').options].some(o=>o.value===selected)?selected:'null';
-      $('llm-capabilities').textContent=(info.capabilities.includes('vision')?'이미지 내용을 함께 볼 수 있는 모델':'이미지 미지원 · 생성 프롬프트만 전달')+' · reasoning '+(values.length?values.map(v=>v===false?'끄기':v===true?'켜기':v).join(' / '):'설정 정보 없음');
+      $('llm-capabilities').textContent=(info.capabilities.includes('vision')?'이미지 내용을 함께 볼 수 있는 모델':'이미지 미지원 · 생성 프롬프트만 전달')+' · reasoning '+(values.length?values.map(thinkingLabel).join(' / '):'서버가 선택지를 제공하지 않아 모델 기본값을 사용합니다.');
     }catch(error){if(epoch===modelEpoch){status(error.message);$('llm-think').replaceChildren();}}
     finally {if(epoch===modelEpoch){modelLoading=false;controls();}}
   }
@@ -442,10 +443,11 @@ export function setupChat({api, getContext, apply, isWorkspaceReady=()=>true, do
       const turn=await transport(body,event=>{
         if(event.type==='reply')run.reply=event.text;
         if(event.type==='reasoning')run.reasoning+=event.text;
+        if(event.type==='status' && event.code==='cpu_fallback')run.executionNote=event.text;
         if(getContext().session!==body.session)return;
-        if(event.type==='reasoning'){const stick=nearBottom();run.reasoningPanel?.update(run.reasoning,true);status('생각하는 중…');if(stick)bottom();}
+        if(event.type==='reasoning'){const stick=nearBottom();run.reasoningPanel?.update(run.reasoning,true);status(run.executionNote || '생각하는 중…');if(stick)bottom();}
         if(event.type==='status')status(event.text);
-        if(event.type==='reply' && run.replyNode?.isConnected){const stick=nearBottom();run.reasoningPanel?.update(run.reasoning,false);renderReply(doc,run.replyNode,event.text);status('답변하고 있어요…');if(stick)bottom();}
+        if(event.type==='reply' && run.replyNode?.isConnected){const stick=nearBottom();run.reasoningPanel?.update(run.reasoning,false);renderReply(doc,run.replyNode,event.text);status(run.executionNote || '답변하고 있어요…');if(stick)bottom();}
       });
       if(turn.status==='FAILED')throw new Error(turn.error || '응답을 완료하지 못했습니다. 설정을 확인하고 다시 보내세요.');
       if(turn.status==='SUCCEEDED' && turn.update && action!=='suggest')await applyTurn(turn,action==='generate');

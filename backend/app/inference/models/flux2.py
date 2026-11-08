@@ -2,34 +2,38 @@
 import json
 from pathlib import Path
 
-SPEC = json.loads((Path(__file__).resolve().parents[2]/'scripts/manifests/flux2-klein-4b.json').read_text(encoding='utf-8'))
+SPEC = json.loads((Path(__file__).resolve().parents[4]/'scripts/manifests/flux2-klein-4b.json').read_text(encoding='utf-8'))
 
 
 def verify_bundle(folder, check_hashes=True, cache=None):
-    from .bundle import verify_bundle as verify
+    from backend.app.inference.models.bundle import verify_bundle as verify
     return verify(folder,SPEC,'Klein',check_hashes,cache)
 
 
 def bundle_fingerprint(folder):
-    from .bundle import bundle_fingerprint as fingerprint
+    from backend.app.inference.models.bundle import bundle_fingerprint as fingerprint
     return fingerprint(folder,SPEC,'Klein')
 
 
 def load_pipeline(folder,width,height,loras=()):
     import torch
     from diffusers import Flux2KleinPipeline
-    from .memory_policy import configure_pipeline
+    from backend.app.inference.runtime.memory_policy import configure_pipeline
     pipe=Flux2KleinPipeline.from_pretrained(str(folder),torch_dtype=torch.bfloat16,local_files_only=True)
-    from .lora import apply_loras
+    from backend.app.inference.conditioning.lora import apply_loras
     apply_loras(pipe,loras)
+    from backend.app.inference.runtime.cpu_weights import remember
+    remember(pipe)
     pipe.memory_policy=configure_pipeline(pipe,width,height)
     pipe.memory_policy['family']='flux2'
     return pipe
 
 
 def resume_pipeline(pipe,width,height):
-    from .memory_policy import configure_pipeline,available_ram
+    from backend.app.inference.runtime.memory_policy import configure_pipeline, available_ram
     if available_ram()<8*1024**3:raise RuntimeError('모델을 다시 사용할 여유 RAM이 부족합니다. 최소 8 GiB를 확보하세요.')
+    from backend.app.inference.runtime.cpu_weights import remember
+    remember(pipe)
     pipe.memory_policy=configure_pipeline(pipe,width,height)
     pipe.memory_policy['family']='flux2'
 

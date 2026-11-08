@@ -3,13 +3,13 @@ import unittest
 from pathlib import Path
 import torch
 from safetensors.torch import save_file
-from backend.app.memory_policy import residency_plan,available_vram
-from backend.app.quantized_weights import FileWeights,load_local_weights
+from backend.app.inference.runtime.memory_policy import residency_plan, available_vram
+from backend.app.inference.quantization.quantized_weights import FileWeights, load_local_weights
 
 
 class MemoryPolicyTests(unittest.TestCase):
     def test_validation_device_keeps_int8_on_cpu_and_requires_workspace_headroom(self):
-        from backend.app.memory_policy import weight_validation_device
+        from backend.app.inference.runtime.memory_policy import weight_validation_device
         elements=100_000_000
         required=elements*20+2*1024**3
         self.assertEqual(weight_validation_device(required,elements,False),'cuda:0')
@@ -29,7 +29,7 @@ class MemoryPolicyTests(unittest.TestCase):
                 'layer.comfy_quant':torch.tensor(list(json.dumps({'format':'float8_e4m3fn'}).encode()),dtype=torch.uint8)},path)
             def create():
                 with torch.device('meta'):return torch.nn.ModuleDict({'layer':torch.nn.Linear(4,4,bias=False)})
-            with patch('backend.app.memory_policy.available_ram',return_value=32*1024**3):
+            with patch('backend.app.inference.runtime.memory_policy.available_ram',return_value=32*1024**3):
                 cpu=FileWeights(create(),str(path),lambda state:state,preload_budget=32)
                 gpu=FileWeights(create(),str(path),lambda state:state,preload_budget=32,validation_device='cuda:0')
             self.assertEqual(gpu.cpu_bytes,32)
@@ -38,7 +38,7 @@ class MemoryPolicyTests(unittest.TestCase):
             self.assertEqual(gpu.cache_bytes,0)
 
     def test_preload_policy_only_spends_ram_on_int8_restore(self):
-        from backend.app.memory_policy import int8_preload_budget
+        from backend.app.inference.runtime.memory_policy import int8_preload_budget
         with tempfile.TemporaryDirectory() as directory:
             path=Path(directory)/'weights.safetensors'
             for dtype,expected in ((torch.float8_e4m3fn,0),(torch.float32,0),(torch.int8,8*1024**3)):
@@ -48,15 +48,15 @@ class MemoryPolicyTests(unittest.TestCase):
             self.assertEqual(int8_preload_budget(path,12*1024**3),0)
     def test_pipeline_full_model_and_sequential_choices(self):
         from unittest.mock import Mock,patch
-        from backend.app.memory_policy import configure_pipeline
+        from backend.app.inference.runtime.memory_policy import configure_pipeline
         gb=1024**3
         with torch.device('meta'):
             models=[torch.nn.Linear(16384,16384,bias=False) for _ in range(2)]
         pipe=Mock();pipe.components=dict(zip(('a','b'),models))
-        with patch('backend.app.memory_policy.available_ram',return_value=32*gb):
+        with patch('backend.app.inference.runtime.memory_policy.available_ram',return_value=32*gb):
             for free,mode,call in [(8*gb,'full','to'),(int(5.5*gb),'model_offload','enable_model_cpu_offload'),(4*gb,'sequential_offload','enable_sequential_cpu_offload')]:
                 pipe.reset_mock()
-                with patch('backend.app.memory_policy.available_vram',return_value=(free,16*gb,{})):
+                with patch('backend.app.inference.runtime.memory_policy.available_vram',return_value=(free,16*gb,{})):
                     self.assertEqual(configure_pipeline(pipe,1024,1024)['mode'],mode)
                 getattr(pipe,call).assert_called_once()
 
@@ -118,24 +118,24 @@ class MemoryPolicyTests(unittest.TestCase):
             with torch.device('meta'):model=torch.nn.Linear(4,4)
             mapping=FileWeights(model,str(path),lambda state:state,dtype=torch.float32)
             mapping.cpu_budget=64
-            with patch('backend.app.memory_policy.available_ram',return_value=7*1024**3):
+            with patch('backend.app.inference.runtime.memory_policy.available_ram',return_value=7*1024**3):
                 mapping['weight'];self.assertEqual(mapping.cpu_bytes,0)
-            with patch('backend.app.memory_policy.available_ram',return_value=32*1024**3):
+            with patch('backend.app.inference.runtime.memory_policy.available_ram',return_value=32*1024**3):
                 first=mapping['weight'];self.assertIs(mapping['weight'],first)
                 mapping['bias'];self.assertEqual(mapping.cpu_bytes,64)
 
     def test_preload_survives_adapter_rename_without_redecoding(self):
         from unittest.mock import patch
         from peft import LoraConfig,inject_adapter_in_model
-        from backend.app.quantized_weights import read_tensor
+        from backend.app.inference.quantization.quantized_weights import read_tensor
         with tempfile.TemporaryDirectory() as directory:
             path=Path(directory)/'weights.safetensors'
             save_file({'0.weight':torch.arange(16.).reshape(4,4),'0.bias':torch.ones(4)},path)
             with torch.device('meta'):model=torch.nn.Sequential(torch.nn.Linear(4,4))
-            with patch('backend.app.memory_policy.available_ram',return_value=12*1024**3):
+            with patch('backend.app.inference.runtime.memory_policy.available_ram',return_value=12*1024**3):
                 constrained=FileWeights(model,str(path),lambda state:state,dtype=torch.float32,preload_budget=80)
                 self.assertEqual(constrained.cpu_bytes,0)
-            with patch('backend.app.memory_policy.available_ram',return_value=32*1024**3),patch('backend.app.quantized_weights.read_tensor',wraps=read_tensor) as reader:
+            with patch('backend.app.inference.runtime.memory_policy.available_ram',return_value=32*1024**3),patch('backend.app.inference.quantization.quantized_weights.read_tensor',wraps=read_tensor) as reader:
                 mapping=FileWeights(model,str(path),lambda state:state,dtype=torch.float32,preload_budget=80)
                 self.assertEqual(reader.call_count,2);self.assertEqual(mapping.cpu_bytes,80)
                 inject_adapter_in_model(LoraConfig(r=2,target_modules=['0']),model,adapter_name='test')
@@ -154,7 +154,7 @@ class MemoryPolicyTests(unittest.TestCase):
             path=Path(directory)/'weights.safetensors'
             save_file({'weight':torch.ones(4,4)},path)
             with torch.device('meta'):model=torch.nn.Linear(4,4,bias=False)
-            with patch('backend.app.memory_policy.available_ram',return_value=32*1024**3):
+            with patch('backend.app.inference.runtime.memory_policy.available_ram',return_value=32*1024**3):
                 mapping=FileWeights(model,str(path),lambda state:state,dtype=torch.float32,preload_budget=64)
             mapping.budget=64
             result=mapping['weight']
@@ -169,7 +169,7 @@ class MemoryPolicyTests(unittest.TestCase):
             path=Path(directory)/'weights.safetensors'
             save_file({'weight':torch.ones(4,4)},path)
             with torch.device('meta'):model=torch.nn.Linear(4,4,bias=False)
-            with patch('backend.app.memory_policy.available_ram',return_value=32*1024**3):
+            with patch('backend.app.inference.runtime.memory_policy.available_ram',return_value=32*1024**3):
                 mapping=FileWeights(model,str(path),lambda state:state,dtype=torch.float32,preload_budget=64)
             # Windows refuses to truncate a file while a safetensors mapping still owns it.
             path.write_bytes(b'changed')
@@ -185,5 +185,5 @@ class MemoryPolicyTests(unittest.TestCase):
             mapping=FileWeights(model,str(path),lambda state:state,dtype=torch.bfloat16)
             self.assertEqual(mapping.file_views,set())
             owned=torch.ones(4,4,dtype=torch.bfloat16);mapping.cpu_budget=32
-            with patch('backend.app.memory_policy.available_ram',return_value=32*1024**3):mapping._cache_cpu('weight',owned)
+            with patch('backend.app.inference.runtime.memory_policy.available_ram',return_value=32*1024**3):mapping._cache_cpu('weight',owned)
             self.assertIs(mapping.cache['weight'],owned)

@@ -2,11 +2,25 @@ import os,unittest
 from unittest.mock import patch
 from types import SimpleNamespace
 import torch
-from backend.app import native_int8
-from backend.app.quantized_weights import undo_convrot
+from backend.app.inference.ops import native_int8
+from backend.app.inference.quantization.quantized_weights import undo_convrot
 
 
 class NativeInt8Tests(unittest.TestCase):
+    @unittest.skipUnless(os.name=='nt' and torch.cuda.is_available(),'Windows CUDA required')
+    def test_convrot256_fast_path_matches_original_at_real_model_widths(self):
+        kernel=native_int8.NativeLinear()
+        torch.manual_seed(447)
+        with torch.inference_mode():
+            for width in (6144,16384):
+                x=torch.randn(1024,width,device='cuda',dtype=torch.bfloat16);x[0]=0
+                weight=torch.randint(-127,128,(32,width),device='cuda',dtype=torch.int8)
+                scale=torch.full((32,1),.03125,device='cuda')
+                actual=kernel(x,weight,scale,256)
+                with patch.object(kernel,'fast',{}):expected=kernel(x,weight,scale,256)
+                torch.testing.assert_close(actual,expected,rtol=0,atol=0)
+        self.assertEqual(kernel.fast_calls,2)
+
     @unittest.skipUnless(os.name=='nt' and torch.cuda.is_available(),'Windows CUDA required')
     def test_wide_mlp_groups_and_upper_boundary(self):
         torch.manual_seed(123)
@@ -59,7 +73,7 @@ class NativeInt8Tests(unittest.TestCase):
         from safetensors.torch import save_file
         from accelerate import cpu_offload
         from peft import LoraConfig,get_peft_model
-        from backend.app.quantized_weights import FileWeights
+        from backend.app.inference.quantization.quantized_weights import FileWeights
         with tempfile.TemporaryDirectory() as folder,torch.inference_mode():
             path=Path(folder)/'weights.safetensors'
             metadata={'format':'int8_tensorwise','convrot':True,'convrot_groupsize':16}
@@ -89,7 +103,7 @@ class NativeInt8Tests(unittest.TestCase):
             packed=mapping.packed_cache.pop('0.base_layer.weight')
             mapping.cache_bytes-=sum(v.numel()*v.element_size() for v in packed[:2])
             mapping.budget=0;mapping.limit_cpu_cache(2048)
-            with patch('backend.app.memory_policy.available_ram',return_value=32*1024**3):
+            with patch('backend.app.inference.runtime.memory_policy.available_ram',return_value=32*1024**3):
                 evicted=model(x)
             torch.testing.assert_close(evicted,actual,rtol=0,atol=0)
             self.assertEqual(mapping.native_hits,3)

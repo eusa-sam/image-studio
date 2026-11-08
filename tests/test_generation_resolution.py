@@ -1,7 +1,7 @@
 import unittest
 
 from backend.app.worker import generation_resolution
-from backend.app.pipeline_cache import PipelineCache
+from backend.app.inference.runtime.pipeline_cache import PipelineCache
 
 
 class GenerationResolutionTests(unittest.TestCase):

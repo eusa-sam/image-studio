@@ -2,8 +2,8 @@
 import json
 from pathlib import Path
 
-SPEC = json.loads((Path(__file__).resolve().parents[2]/'scripts/manifests/z-image-turbo.json').read_text(encoding='utf-8'))
-BF16_SPEC = json.loads((Path(__file__).resolve().parents[2]/'scripts/manifests/z-image-turbo-bf16.json').read_text(encoding='utf-8'))
+SPEC = json.loads((Path(__file__).resolve().parents[4]/'scripts/manifests/z-image-turbo.json').read_text(encoding='utf-8'))
+BF16_SPEC = json.loads((Path(__file__).resolve().parents[4]/'scripts/manifests/z-image-turbo-bf16.json').read_text(encoding='utf-8'))
 
 
 def bundle_spec(folder):
@@ -23,7 +23,8 @@ def activation_reserve(width,height):
 
 def configure_pipeline(pipe,width,height):
     import torch
-    from .memory_policy import configure_pipeline as configure
+    from backend.app.inference.runtime.cpu_weights import restore
+    from backend.app.inference.runtime.memory_policy import configure_pipeline as configure
     policy=configure(pipe,width,height,activation_reserve_bytes=activation_reserve(width,height))
     if policy['mode']!='sequential_offload' or getattr(pipe,'text_encoder',None) is not None:
         return policy
@@ -36,7 +37,7 @@ def configure_pipeline(pipe,width,height):
         no_split_module_classes=pipe.transformer._no_split_modules,dtype=pipe.transformer.dtype)
     # Keep the existing safe path when RAM cannot hold the planned offloaded blocks.
     if set(mapping.values())!={0,'cpu'}:return policy
-    pipe.remove_all_hooks();pipe.to('cpu')
+    pipe.remove_all_hooks();restore(pipe);pipe.to('cpu')
     dispatch_model(pipe.transformer,mapping,main_device='cuda:0')
     cpu_offload(pipe.vae,execution_device=torch.device('cuda:0'))
     policy.update(mode='block_offload',device_map=mapping,transformer_budget_bytes=budget)
@@ -44,12 +45,12 @@ def configure_pipeline(pipe,width,height):
 
 
 def verify_bundle(folder, check_hashes=True, cache=None):
-    from .bundle import verify_bundle as verify
+    from backend.app.inference.models.bundle import verify_bundle as verify
     return verify(folder,bundle_spec(folder),'Z-Image',check_hashes,cache)
 
 
 def bundle_fingerprint(folder):
-    from .bundle import bundle_fingerprint as fingerprint
+    from backend.app.inference.models.bundle import bundle_fingerprint as fingerprint
     return fingerprint(folder,bundle_spec(folder),'Z-Image')
 
 
@@ -57,8 +58,12 @@ def load_pipeline(folder,width,height,loras=()):
     import torch
     from diffusers import ZImagePipeline
     pipe=ZImagePipeline.from_pretrained(str(folder),torch_dtype=torch.bfloat16,local_files_only=True)
-    from .lora import apply_loras
+    from backend.app.inference.conditioning.lora import apply_loras
     apply_loras(pipe,loras)
+    from backend.app.inference.ops.fused_norm_rope import install
+    install(pipe,'zimage')
+    from backend.app.inference.runtime.cpu_weights import remember
+    remember(pipe)
     pipe.memory_policy=configure_pipeline(pipe,width,height)
     pipe.memory_policy['family']='zimage'
     pipe._encoder_source=Path(folder)/'text_encoder'
@@ -67,8 +72,10 @@ def load_pipeline(folder,width,height,loras=()):
 
 
 def resume_pipeline(pipe,width,height):
-    from .memory_policy import available_ram
+    from backend.app.inference.runtime.memory_policy import available_ram
     if available_ram()<8*1024**3:raise RuntimeError('모델을 다시 사용할 여유 RAM이 부족합니다. 최소 8 GiB를 확보하세요.')
+    from backend.app.inference.runtime.cpu_weights import remember
+    remember(pipe)
     pipe.memory_policy=configure_pipeline(pipe,width,height)
     pipe.memory_policy['family']='zimage'
     pipe.memory_policy['text_encoder_released']=getattr(pipe,'text_encoder',None) is None
@@ -108,7 +115,7 @@ def count_prompt_tokens(folder,positive,negative,tokenizer=None):
 
 def reconfigure_after_encoder_change(pipe):
     import torch
-    from .memory_policy import available_vram
+    from backend.app.inference.runtime.memory_policy import available_vram
     width,height=pipe._generation_size
     policy=configure_pipeline(pipe,width,height)
     for key in ('device_map','transformer_budget_bytes'):pipe.memory_policy.pop(key,None)
@@ -119,13 +126,14 @@ def reconfigure_after_encoder_change(pipe):
 def prompt_arguments(pipe,positive,cache):
     import torch
     import gc
-    from .memory_policy import available_ram
+    from backend.app.inference.runtime.cpu_weights import restore, forget
+    from backend.app.inference.runtime.memory_policy import available_ram
     managed=isinstance(getattr(pipe,'_encoder_source',None),Path)
     if positive not in cache:
         if managed and pipe.text_encoder is None:
             from transformers import Qwen3Model
             # A residency change may have put the transformer on GPU since the last prompt.
-            pipe.remove_all_hooks();pipe.to('cpu');torch.cuda.empty_cache()
+            pipe.remove_all_hooks();restore(pipe);pipe.to('cpu');torch.cuda.empty_cache()
             pipe.text_encoder=Qwen3Model.from_pretrained(str(pipe._encoder_source),torch_dtype=torch.bfloat16,local_files_only=True)
             reconfigure_after_encoder_change(pipe)
             pipe.memory_policy['text_encoder_released']=False
@@ -139,7 +147,8 @@ def prompt_arguments(pipe,positive,cache):
         transformer_bytes=sum(value.numel()*value.element_size() for value in list(pipe.transformer.parameters())+list(pipe.transformer.buffers()))
         # Drop the idle encoder before choosing faster denoiser residency.
         if pipe.memory_policy['mode']=='sequential_offload' or available_ram()<8*1024**3+transformer_bytes:
-            pipe.remove_all_hooks();pipe.to('cpu')
+            pipe.remove_all_hooks();restore(pipe);pipe.to('cpu')
+            forget(pipe)
             pipe.text_encoder=None
             gc.collect();torch.cuda.empty_cache()
             reconfigure_after_encoder_change(pipe)

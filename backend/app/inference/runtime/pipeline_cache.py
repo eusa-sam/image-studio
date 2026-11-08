@@ -63,17 +63,18 @@ class PipelineCache:
         self.verified={}
         self.hash_checks=[]
         self.suspended=False
+        self.lora_weights=None
 
     def file_hash(self,path):
         started=time.perf_counter()
         cpu_started=time.thread_time()
         path=path.resolve()
-        from .verification_receipts import hash_reader
+        from backend.app.verification_receipts import hash_reader
         with hash_reader(path) as stream:
             stat=path.stat()
             stamp=file_stamp(path)
             previous=self.verified.get(path)
-            from .verification_receipts import read_receipt,write_receipt
+            from backend.app.verification_receipts import read_receipt, write_receipt
             reused=stamp is not None and previous is not None and previous[0]==stamp
             source='memory' if reused else 'receipt'
             result=previous[1] if reused else read_receipt(self.receipt_root,path,stamp)
@@ -103,29 +104,41 @@ class PipelineCache:
         values['components']={key:value for key,value in (plan.get('components') or {}).items() if key!='upscaler'}
         if plan.get('runner','').startswith(('sdxl_','sd1_','sd2_')):
             values['prediction_type']=plan.get('settings',{}).get('prediction_type')
-        if plan.get('runner','').startswith(('sdxl_','sd1_','sd2_','flux2_','zimage_','anima_')):
+        if plan.get('runner','').startswith(('sdxl_','sd1_','sd2_','flux2_','zimage_','anima_','krea2_')):
             values['loras']=[{key:value for key,value in row.items() if key!='weight'} for row in (plan.get('loras') or [])]
         return json.dumps([values,resolution],sort_keys=True)
 
     def clear(self):
-        self.pipe=None
-        self.key=None
-        self.conditioning.clear()
-        self.positive=None
-        self.suspended=False
+        try:
+            if self.pipe is not None:
+                from .execution import release
+                release(self.pipe)
+        finally:
+            self.pipe=None
+            self.key=None
+            self.conditioning.clear()
+            self.positive=None
+            self.suspended=False
+            self.lora_weights=None
 
     def suspend(self):
         if self.pipe is None:return False
         import gc,torch
+        from .execution import enter_phase,finish_transfers
+        finish_transfers(self.pipe)
+        enter_phase(self.pipe,'suspend')
         if self.pipe.memory_policy.get('family') in ('flux2','zimage','sdxl','sd1','sd2','anima'):
-            from .memory_policy import available_ram
+            from backend.app.inference.runtime.memory_policy import available_ram
+            from backend.app.inference.runtime.cpu_weights import backed_tensors, restore
+            backed=backed_tensors(self.pipe)
             modules=[module for module in self.pipe.components.values() if isinstance(module,torch.nn.Module)]
-            moving=sum(value.numel()*value.element_size() for module in modules for value in list(module.parameters())+list(module.buffers()) if value.is_cuda)
+            moving=sum(value.numel()*value.element_size() for module in modules for value in list(module.parameters())+list(module.buffers()) if value.is_cuda and id(value) not in backed)
             moving+=sum(value.numel()*value.element_size() for values in self.conditioning.values() for value in values.values() if value.is_cuda)
             if available_ram()<8*1024**3+moving:self.clear()
             else:
                 if self.pipe.memory_policy.get('family')=='anima':self.pipe.anima_manager.disable_auto_cpu_offload()
                 else:self.pipe.remove_all_hooks()
+                restore(self.pipe)
                 self.pipe.to('cpu')
                 self.suspended=True
         elif self.pipe.memory_policy['mode']=='partial':
@@ -138,6 +151,8 @@ class PipelineCache:
         return self.suspended
 
     def get(self,key,positive,*,replace_loras=None):
+        # Klein/Z validation permits transformer LoRA only; encoded text is unchanged.
+        encoder_lora=getattr(self.pipe,'memory_policy',{}).get('family') not in ('flux2','zimage','krea2')
         if self.pipe is not None and self.key is not None and key!=self.key and getattr(self.pipe,'memory_policy',{}).get('family') in ('sd1','sd2','sdxl','flux2','zimage','anima'):
             previous=json.loads(self.key);requested=json.loads(key)
             if previous[0]==requested[0] and previous[1]!=requested[1]:
@@ -151,18 +166,45 @@ class PipelineCache:
             requested[0]['loras']=[]
             if previous==requested:
                 try:
+                    if getattr(self.pipe,'memory_policy',{}).get('family')=='krea2' and self.pipe.memory_policy['mode']=='partial':
+                        from backend.app.inference.models.krea2_lora import replace_loras as replace_krea_loras
+                        replace_krea_loras(self.pipe,replace_loras)
+                        self.key=key
+                        self.lora_weights=tuple(selection['weight'] for selection,_ in replace_loras)
+                        return self.get(key,positive)
                     # Re-plan new adapters from CPU; ANIMA also needs its manager disabled for removal.
-                    replan=replace_loras or getattr(self.pipe,'memory_policy',{}).get('family')=='anima'
+                    replan=replace_loras or getattr(self.pipe,'memory_policy',{}).get('family')=='anima' or getattr(self.pipe,'_cpu_weights',None)
                     if replan and not self.suspended and not self.suspend():return None
+                    from backend.app.inference.runtime.cpu_weights import forget
+                    forget(self.pipe)
                     if adapters:self.pipe.delete_adapters([f'lora_{i}' for i in range(len(adapters))])
                     if replace_loras:
-                        from .lora import apply_loras
+                        from backend.app.inference.conditioning.lora import apply_loras
                         apply_loras(self.pipe,replace_loras)
+                    if encoder_lora:self.conditioning.clear()
                 except Exception:
                     self.clear()
                     raise
                 self.key=key
         if key!=self.key:self.clear()
+        if replace_loras is not None:
+            weights=tuple(selection['weight'] for selection,_ in replace_loras)
+            if weights!=self.lora_weights:
+                if encoder_lora:self.conditioning.clear()
+                if self.pipe is not None:
+                    from .execution import finish_transfers
+                    finish_transfers(self.pipe)
+                    for mapping in getattr(self.pipe,'weight_maps',()):
+                        if hasattr(mapping,'derived_identity'):
+                            from backend.app.inference.quantization.lora_weights import invalidate
+                            invalidate(mapping)
+                    # Reattach CPU originals before invalidation would force a new device-to-host copy.
+                    if getattr(self.pipe,'_cpu_weights',None) and not self.suspended and not self.suspend():
+                        self.lora_weights=weights
+                        return None
+                    from backend.app.inference.runtime.cpu_weights import forget
+                    forget(self.pipe)
+                self.lora_weights=weights
         if positive!=self.positive:
             self.conditioning.clear()
             self.positive=positive

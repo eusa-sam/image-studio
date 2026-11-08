@@ -33,6 +33,7 @@ test('memory labels distinguish the initial measurement and budgets from live us
   assert.match(state.memory,/RAM 캐시 상한 16.0 GiB/);
   const blocks=jobProgress({status:'RUNNING',progress:{stage:'generate',memory_policy:{mode:'block_offload'}}});
   assert.equal(blocks.memory,'일부 블록 GPU 상주');
+  assert.equal(jobProgress({status:'RUNNING',progress:{stage:'generate',memory_policy:{mode:'denoiser_resident'}}}).memory,'생성 모델 GPU 상주');
 });
 
 test('native progress is indeterminate for loading and removed after completion',()=>{

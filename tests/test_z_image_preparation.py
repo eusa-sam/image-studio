@@ -6,7 +6,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from scripts.prepare_z_image_bf16 import prepare,convert
-from backend.app import z_image
+from backend.app.inference.models import z_image
 
 
 class BF16PreparationTests(unittest.TestCase):
@@ -22,10 +22,10 @@ class BF16PreparationTests(unittest.TestCase):
             sha=hashlib.sha256(candidate.read_bytes()).hexdigest()
             spec=dict(repository='test',revision='pinned',variant='bf16-local-v1',files=[dict(path=name,size=candidate.stat().st_size,sha256=sha)])
             target=root/'prepared';before=original.read_bytes()
-            with patch('backend.app.z_image.verify_bundle') as verify_source:
+            with patch('backend.app.inference.models.z_image.verify_bundle') as verify_source:
                 prepare(source,target,spec);verify_source.assert_called_once_with(source.resolve())
             self.assertTrue(torch.equal(load_file(str(target/name))['weight'],weights.bfloat16()))
-            with patch('backend.app.z_image.verify_bundle',side_effect=AssertionError('No source read on complete repeat')):
+            with patch('backend.app.inference.models.z_image.verify_bundle',side_effect=AssertionError('No source read on complete repeat')):
                 prepare(source,target,spec)
             self.assertEqual(original.read_bytes(),before)
             manifest=json.loads((target/'download_manifest.json').read_text())
@@ -50,7 +50,7 @@ class BF16PreparationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root=Path(directory);source=root/'source';source.mkdir();target=root/'out'
             spec=dict(files=[dict(path='transformer/w.safetensors')])
-            with patch('backend.app.z_image.verify_bundle'),patch('scripts.prepare_z_image_bf16.convert',side_effect=RuntimeError('conversion failed')):
+            with patch('backend.app.inference.models.z_image.verify_bundle'),patch('scripts.prepare_z_image_bf16.convert',side_effect=RuntimeError('conversion failed')):
                 with self.assertRaisesRegex(RuntimeError,'failed'):prepare(source,target,spec)
             self.assertFalse((target/'download_manifest.json').exists())
             self.assertEqual(list((target/'transformer').iterdir()),[])

@@ -275,14 +275,25 @@ class ChatTests(unittest.TestCase):
                 ollama.image_ready()
             ollama.image_ready(selected_model='external')
 
-    def test_thinking_capability_without_metadata_allows_boolean_controls_only(self):
+    def test_thinking_controls_preserve_levels_and_offer_boolean_fallback(self):
         ollama=Ollama()
-        for advertised in (None, {'values':[False,'low','medium'],'default':'medium'}, {'values':[False],'default':False}):
+        for advertised in (None, {}, {'values':[]}, {'values':[False,'low','medium'],'default':'medium'}, {'values':[False],'default':False}):
             info={'capabilities':['completion','thinking']}
             if advertised is not None:info['thinking']=advertised
             with patch.object(ollama,'models',return_value=[{'name':'test'}]),patch.object(ollama,'request',return_value=info):
                 _,actual=ollama.local_model('test')
-            self.assertEqual(actual['thinking'],advertised if advertised is not None else {'values':[False,True],'default':None,'source':'capability_fallback'})
+            expected=advertised if advertised and advertised.get('values') else dict(advertised or {},values=[True,False])
+            self.assertEqual(actual['thinking'],expected)
+            from backend.app.chat import ChatInput
+            if expected['values']==[True,False]:
+                for value in (True,False):
+                    body=ChatInput(**dict(self.body,think=value))
+                    with patch('backend.app.models.scan',return_value=[]):
+                        request=self.client.app.state.chat._request(body,body.model_dump(mode='json'),actual)
+                    self.assertIs(request['think'],value)
+                body=ChatInput(**dict(self.body,think='xhigh'))
+                with patch('backend.app.models.scan',return_value=[]), self.assertRaises(ValueError):
+                    self.client.app.state.chat._request(body,body.model_dump(mode='json'),actual)
         with patch.object(ollama,'models',return_value=[{'name':'test'}]),patch.object(ollama,'request',return_value={'capabilities':['completion']}):
             self.assertNotIn('thinking',ollama.local_model('test')[1])
 

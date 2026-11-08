@@ -1,7 +1,7 @@
 import hashlib,json,tempfile,threading,unittest
 from pathlib import Path
 from unittest.mock import Mock,patch
-from backend.app.pipeline_cache import PipelineCache
+from backend.app.inference.runtime.pipeline_cache import PipelineCache
 from backend.app.worker import run
 
 
@@ -29,7 +29,7 @@ class KreaStartupTests(unittest.TestCase):
                 def prepare(*args):
                     ready.set();return prepared
                 cache=PipelineCache()
-                with patch('backend.app.worker.MODEL_ROOT',root),patch('backend.app.worker.verify_components',side_effect=components),patch('backend.app.worker.verify_inputs',side_effect=verify),patch('backend.app.krea2.prepare_encoder',side_effect=prepare) as encoder,patch('backend.app.krea2.load_pipeline',side_effect=Loaded) as loader,patch('torch.cuda.is_available',return_value=True),patch('torch.cuda.reset_peak_memory_stats'),patch('torch.cuda.empty_cache'):
+                with patch('backend.app.worker.MODEL_ROOT',root),patch('backend.app.worker.verify_components',side_effect=components),patch('backend.app.worker.verify_inputs',side_effect=verify),patch('backend.app.inference.models.krea2.prepare_encoder',side_effect=prepare) as encoder,patch('backend.app.inference.models.krea2.load_pipeline',side_effect=Loaded) as loader,patch('torch.cuda.is_available',return_value=True),patch('torch.cuda.reset_peak_memory_stats'),patch('torch.cuda.empty_cache'):
                     with self.assertRaises(Loaded if failure is None else ValueError):run(request,cache)
                 self.assertIsNone(cache.pipe)
                 self.assertFalse(cache.conditioning)
@@ -40,7 +40,7 @@ class KreaStartupTests(unittest.TestCase):
                 else:loader.assert_not_called()
 
     def test_large_gpu_keeps_original_full_loading_path(self):
-        from backend.app.krea2 import prepare_encoder
-        with patch('backend.app.memory_policy.available_vram',return_value=(40*1024**3,48*1024**3,{})),patch('backend.app.krea2.verify_config') as config:
+        from backend.app.inference.models.krea2 import prepare_encoder
+        with patch('backend.app.inference.runtime.memory_policy.available_vram',return_value=(40*1024**3,48*1024**3,{})),patch('backend.app.inference.models.krea2.verify_config') as config:
             self.assertIsNone(prepare_encoder(Path('unused'),Path('unused'),'prompt'))
             config.assert_not_called()

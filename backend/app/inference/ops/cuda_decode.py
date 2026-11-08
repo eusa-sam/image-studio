@@ -46,7 +46,7 @@ class Kernel:
     def __init__(self,source=SOURCE):
         folder=Path(torch.__file__).parent/'lib'
         self.directory=os.add_dll_directory(str(folder))
-        self.nvrtc=c.CDLL(str(folder/'nvrtc64_120_0.dll'))
+        self.nvrtc=c.CDLL(str(folder/f'nvrtc64_{torch.version.cuda.split(".")[0]}0_0.dll'))
         self.driver=c.WinDLL('nvcuda.dll',winmode=0x00000800)
         signatures={
             'nvrtcCreateProgram':[c.POINTER(c.c_void_p),c.c_char_p,c.c_char_p,c.c_int,c.c_void_p,c.c_void_p],

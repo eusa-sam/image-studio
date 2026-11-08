@@ -7,7 +7,7 @@ from pathlib import Path
 from unittest.mock import patch
 from scripts.inspect_models import inspect
 from backend.app.models import preflight
-from backend.app.prompt_tokens import count_tokens
+from backend.app.inference.conditioning.prompt_tokens import count_tokens
 
 
 class SD1Tests(unittest.TestCase):

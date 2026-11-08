@@ -3,9 +3,70 @@ import ctypes as c
 import os
 import warnings
 import torch
-from .cuda_decode import Kernel
+from backend.app.inference.ops.cuda_decode import Kernel
 
 SOURCE=r'''
+__device__ __forceinline__ float rotate16(float value,int lane) {
+ int base=lane&~3;
+ float sum=((__shfl_sync(0xffffffff,value,base)+__shfl_sync(0xffffffff,value,base+1))
+            +__shfl_sync(0xffffffff,value,base+2))+__shfl_sync(0xffffffff,value,base+3);
+ value=sum-2*__shfl_sync(0xffffffff,value,base+3-(lane&3));
+ base=lane&~12;
+ sum=((__shfl_sync(0xffffffff,value,base)+__shfl_sync(0xffffffff,value,base+4))
+       +__shfl_sync(0xffffffff,value,base+8))+__shfl_sync(0xffffffff,value,base+12);
+ return sum-2*__shfl_sync(0xffffffff,value,base+(3-((lane/4)%4))*4);
+}
+template<int WIDTH>
+__device__ void rotate256(const unsigned short* x,float* scale,signed char* q) {
+ __shared__ float maxima[8];
+ int t=threadIdx.x,lane=t%32,warp=t/32,row=blockIdx.x;
+ float values[WIDTH/256],maximum=0.0f;
+ #pragma unroll
+ for(int j=0;j<WIDTH/2048;j++) {
+  int base=warp*256+j*2048+lane;
+  float v[8];
+  #pragma unroll
+  for(int k=0;k<8;k++)v[k]=rotate16(__uint_as_float(((unsigned int)x[(long long)row*WIDTH+base+k*32])<<16),lane);
+  #pragma unroll
+  for(int k=0;k<8;k+=2) {
+   float a=v[k],b=v[k+1];
+   float sum=((__shfl_sync(0xffffffff,a,lane&15)+__shfl_sync(0xffffffff,a,(lane&15)+16))
+              +__shfl_sync(0xffffffff,b,lane&15))+__shfl_sync(0xffffffff,b,(lane&15)+16);
+   v[k]=sum-2*__shfl_sync(0xffffffff,b,lane^16);
+   v[k+1]=sum-2*__shfl_sync(0xffffffff,a,lane^16);
+  }
+  #pragma unroll
+  for(int p=0;p<2;p++) {
+   float a=v[p],b=v[p+2],c=v[p+4],d=v[p+6];
+   float sum=((a+b)+c)+d;
+   v[p]=sum-2*d;v[p+2]=sum-2*c;v[p+4]=sum-2*b;v[p+6]=sum-2*a;
+  }
+  #pragma unroll
+  for(int k=0;k<8;k++) {
+   values[j*8+k]=v[k]*0.0625f;
+   maximum=fmaxf(maximum,fabsf(values[j*8+k]));
+  }
+ }
+ for(int offset=16;offset;offset/=2)maximum=fmaxf(maximum,__shfl_down_sync(0xffffffff,maximum,offset));
+ if(lane==0)maxima[warp]=maximum;
+ __syncthreads();
+ if(warp==0) {
+  maximum=lane<8?maxima[lane]:0.0f;
+  for(int offset=16;offset;offset/=2)maximum=fmaxf(maximum,__shfl_down_sync(0xffffffff,maximum,offset));
+  if(lane==0){maxima[0]=fmaxf(maximum/127.0f,1.0e-12f);scale[row]=maxima[0];}
+ }
+ __syncthreads();
+ float s=maxima[0];
+ #pragma unroll
+ for(int j=0;j<WIDTH/2048;j++) {
+  int base=warp*256+j*2048+lane;
+  #pragma unroll
+  for(int k=0;k<8;k++)q[(long long)row*WIDTH+base+k*32]=(signed char)__float2int_rn(fminf(127.0f,fmaxf(-127.0f,values[j*8+k]/s)));
+ }
+}
+extern "C" __global__ void rotate256_6144(const unsigned short* x,float* s,signed char* q,int width,int group){rotate256<6144>(x,s,q);}
+extern "C" __global__ void rotate256_16384(const unsigned short* x,float* s,signed char* q,int width,int group){rotate256<16384>(x,s,q);}
+
 extern "C" __global__ void decode(const unsigned short* x,float* scale,signed char* q,int width,int group) {
  extern __shared__ float values[];
  __shared__ float maxima[256];
@@ -42,6 +103,11 @@ class NativeLinear:
         self.kernel.driver.cuFuncSetAttribute.argtypes=[c.c_void_p,c.c_int,c.c_int]
         # Opt in to >48 KiB shared memory for the 16384-wide MLP input.
         self.kernel.check(self.kernel.driver.cuFuncSetAttribute(self.kernel.function,8,65536))
+        self.fast={};self.fast_calls=0
+        for width in (6144,16384):
+            function=c.c_void_p()
+            self.kernel.check(self.kernel.driver.cuModuleGetFunction(c.byref(function),self.kernel.module,('rotate256_'+str(width)).encode()))
+            self.fast[width]=function
         self.finish=c.c_void_p()
         self.kernel.check(self.kernel.driver.cuModuleGetFunction(c.byref(self.finish),self.kernel.module,b'finish'))
 
@@ -55,7 +121,9 @@ class NativeLinear:
         values=x.reshape(rows,width).contiguous()
         quantized=torch.empty_like(values,dtype=torch.int8)
         input_scale=torch.empty((rows,1),device=x.device,dtype=torch.float32)
-        self.launch(self.kernel.function,rows,[c.c_void_p(v.data_ptr()) for v in (values,input_scale,quantized)]+[c.c_int(width),c.c_int(group)],shared=width*4)
+        fast=group==256 and width in self.fast and rows>=1024
+        if fast:self.fast_calls+=1
+        self.launch(self.fast[width] if fast else self.kernel.function,rows,[c.c_void_p(v.data_ptr()) for v in (values,input_scale,quantized)]+[c.c_int(width),c.c_int(group)],shared=0 if fast else width*4)
         sums=torch._int_mm(quantized,weight.t())
         output=torch.empty_like(sums,dtype=torch.bfloat16)
         self.launch(self.finish,(output.numel()+255)//256,[c.c_void_p(v.data_ptr()) for v in (sums,input_scale,scale,output)]+[c.c_longlong(output.numel()),c.c_int(weight.shape[0])])

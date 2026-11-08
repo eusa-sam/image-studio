@@ -28,7 +28,7 @@ class RuntimeTests(unittest.TestCase):
             queue.suspend_image_model();queue.suspend_image_model()
             self.assertEqual(queue.image_model_status(),{'state':'cpu'})
             queue.process.stdin.write.assert_called_once();queue._terminate.assert_not_called()
-            with patch('backend.app.jobs.time.monotonic',return_value=600),patch('backend.app.memory_policy.driver_memory',return_value=(1024**3,16*1024**3)),patch('backend.app.memory_policy.available_ram',return_value=16*1024**3):
+            with patch('backend.app.jobs.time.monotonic',return_value=600),patch('backend.app.inference.runtime.memory_policy.driver_memory',return_value=(1024**3,16*1024**3)),patch('backend.app.inference.runtime.memory_policy.available_ram',return_value=16*1024**3):
                 queue.maintain_idle_model()
             queue._terminate.assert_not_called()
             queue.release_image_model();queue._terminate.assert_called_once()
@@ -56,7 +56,7 @@ class RuntimeTests(unittest.TestCase):
 
     def test_elapsed_idle_time_alone_does_not_reload_model_and_checks_are_throttled(self):
         queue=self.idle_queue()
-        with patch('backend.app.jobs.time.monotonic',return_value=600),patch('backend.app.memory_policy.driver_memory',return_value=(4*1024**3,16*1024**3)) as driver,patch('backend.app.memory_policy.available_ram',return_value=16*1024**3):
+        with patch('backend.app.jobs.time.monotonic',return_value=600),patch('backend.app.inference.runtime.memory_policy.driver_memory',return_value=(4*1024**3,16*1024**3)) as driver,patch('backend.app.inference.runtime.memory_policy.available_ram',return_value=16*1024**3):
             queue.maintain_idle_model();queue.maintain_idle_model()
             driver.assert_called_once();queue._terminate.assert_not_called()
             self.assertEqual(queue.image_model_status(),{'state':'warm'})
@@ -69,7 +69,7 @@ class RuntimeTests(unittest.TestCase):
                     command=json.loads(data)
                     (queue.service/('suspend-'+command['token']+'.json')).write_text(content,encoding='utf-8')
                 queue.process.stdin.write.side_effect=acknowledge
-                with patch('backend.app.jobs.time.monotonic',return_value=600),patch('backend.app.memory_policy.driver_memory',return_value=(1024**3,16*1024**3)),patch('backend.app.memory_policy.available_ram',return_value=16*1024**3):
+                with patch('backend.app.jobs.time.monotonic',return_value=600),patch('backend.app.inference.runtime.memory_policy.driver_memory',return_value=(1024**3,16*1024**3)),patch('backend.app.inference.runtime.memory_policy.available_ram',return_value=16*1024**3):
                     queue.maintain_idle_model()
                 queue._terminate.assert_called_once()
                 self.assertEqual(queue.image_model_status(),{'state':'released'})
@@ -79,7 +79,7 @@ class RuntimeTests(unittest.TestCase):
     def test_memory_pressure_and_unknown_measurement_release_only_idle_worker(self):
         for free,ram,error in [(1024**3,16*1024**3,None),(4*1024**3,7*1024**3,None),(0,0,OSError('driver unavailable'))]:
             queue=self.idle_queue()
-            with patch('backend.app.jobs.time.monotonic',return_value=600),patch('backend.app.memory_policy.driver_memory',return_value=(free,16*1024**3),side_effect=error),patch('backend.app.memory_policy.available_ram',return_value=ram):
+            with patch('backend.app.jobs.time.monotonic',return_value=600),patch('backend.app.inference.runtime.memory_policy.driver_memory',return_value=(free,16*1024**3),side_effect=error),patch('backend.app.inference.runtime.memory_policy.available_ram',return_value=ram):
                 queue.maintain_idle_model()
             queue._terminate.assert_called_once();self.assertIsNone(queue.process)
             self.assertTrue(queue.gpu.acquire(blocking=False));queue.gpu.release()
@@ -89,7 +89,7 @@ class RuntimeTests(unittest.TestCase):
             queue=self.idle_queue()
             if running:queue.current=('workspace','job')
             else:queue.gpu.acquire()
-            with patch('backend.app.jobs.time.monotonic',return_value=600),patch('backend.app.memory_policy.driver_memory') as driver:
+            with patch('backend.app.jobs.time.monotonic',return_value=600),patch('backend.app.inference.runtime.memory_policy.driver_memory') as driver:
                 queue.maintain_idle_model();driver.assert_not_called();queue._terminate.assert_not_called()
             if not running:queue.gpu.release()
 

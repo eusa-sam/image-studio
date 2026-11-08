@@ -112,8 +112,10 @@ def load_pipeline(folder, guidance=4.0, checkpoint=None, loras=(), resolution=(1
         pipe.update_components(**{name:spec.load(**options)})
     if checkpoint:pipe.update_components(**load_single_components(checkpoint,folder))
     pipe.update_components(guider=ClassifierFreeGuidance(guidance_scale=guidance))
-    from .lora import apply_loras
+    from backend.app.inference.conditioning.lora import apply_loras
     apply_loras(pipe,loras)
+    from backend.app.inference.ops.fused_norm_rope import install
+    install(pipe,'anima')
     pipe.vae.enable_tiling()
     pipe.anima_manager=manager
     configure_pipeline(pipe,resolution)
@@ -121,7 +123,7 @@ def load_pipeline(folder, guidance=4.0, checkpoint=None, loras=(), resolution=(1
 
 
 def configure_pipeline(pipe,resolution):
-    from .memory_policy import available_vram,available_ram,residency_plan
+    from backend.app.inference.runtime.memory_policy import available_vram, available_ram, residency_plan
     free,total,measurement=available_vram()
     weights=sum(p.numel()*p.element_size() for component in ('text_encoder','vae','text_conditioner','transformer')
                 for p in getattr(pipe,component).parameters())

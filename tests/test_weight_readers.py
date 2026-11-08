@@ -4,7 +4,7 @@ from unittest.mock import patch
 import torch
 from safetensors import safe_open
 from safetensors.torch import save_file
-from backend.app.quantized_weights import open_weights,weight_readers
+from backend.app.inference.quantization.quantized_weights import open_weights, weight_readers
 
 
 class WeightReaderTests(unittest.TestCase):
@@ -53,7 +53,7 @@ class WeightReaderTests(unittest.TestCase):
             with open_weights(path) as reader:self.assertIsNot(reader,seen[0])
 
     def test_validation_and_demand_read_share_one_reader(self):
-        from backend.app.quantized_weights import FileWeights
+        from backend.app.inference.quantization.quantized_weights import FileWeights
         with tempfile.TemporaryDirectory() as directory:
             path=Path(directory)/'weights.safetensors';model=torch.nn.Linear(2,2)
             original=model.weight.detach().clone();save_file(model.state_dict(),str(path))

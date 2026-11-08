@@ -11,6 +11,33 @@ from backend.app.storage import SessionStore
 
 
 class ServerControlTests(unittest.TestCase):
+    def test_native_port_defaults_file_environment_and_container(self):
+        from scripts.server import default_port
+        with tempfile.TemporaryDirectory() as directory, patch('scripts.server.ROOT', Path(directory)), patch.dict('os.environ', {}, clear=True):
+            path=Path(directory)/'.env'
+            self.assertEqual(default_port(),8765)
+            path.write_text('# Local settings\nOTHER=value\nIMAGE_STUDIO_PORT="18765" # development\n',encoding='utf-8')
+            self.assertEqual(default_port(),18765)
+            with patch.dict('os.environ',{'IMAGE_STUDIO_PORT':'23456'}):
+                self.assertEqual(default_port(),23456)
+            for invalid in ('0','65536','abc','18.765',''):
+                with patch.dict('os.environ',{'IMAGE_STUDIO_PORT':invalid}):
+                    with self.assertRaises(ValueError):default_port()
+            with patch.dict('os.environ',{'IMAGE_STUDIO_CONTAINER':'1'}):
+                self.assertEqual(default_port(),8765)
+
+    def test_port_specific_host_and_origin(self):
+        from fastapi.testclient import TestClient
+        from backend.app.main import create_app
+        for port in (8765,18765):
+            client=TestClient(create_app(port=port),base_url=f'http://127.0.0.1:{port}')
+            self.assertEqual(client.get('/',headers={'Origin':f'http://localhost:{port}'}).status_code,200)
+            other=18765 if port==8765 else 8765
+            for headers in ({'Host':f'localhost:{other}'},{'Origin':f'http://localhost:{other}'},
+                            {'Host':f'evil.example:{port}'},{'Origin':f'https://localhost:{port}'}):
+                self.assertEqual(client.get('/',headers=headers).status_code,403)
+            client.close()
+
     def test_state_reader_and_writer_share_file_lock(self):
         from concurrent.futures import ThreadPoolExecutor
         from filelock import FileLock
@@ -39,7 +66,7 @@ class ServerControlTests(unittest.TestCase):
                 first=start(runtime,data,port)
                 self.assertEqual(first['state'],'running')
                 self.assertEqual(start(runtime,data,port)['pid'],first['pid'])
-                request=urllib.request.Request(f'http://127.0.0.1:{port}/api/settings',headers={'Host':'127.0.0.1:8765'})
+                request=urllib.request.Request(f'http://127.0.0.1:{port}/api/settings',headers={'Origin':f'http://127.0.0.1:{port}'})
                 with urllib.request.urlopen(request,timeout=5) as response:
                     self.assertEqual(response.status,200)
                     self.assertIn('model_path',json.load(response))

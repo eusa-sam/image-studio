@@ -11,7 +11,7 @@ from tokenizers.models import WordLevel
 from transformers import CLIPTextConfig,CLIPTextModel,PreTrainedTokenizerFast
 from diffusers.loaders import TextualInversionLoaderMixin
 
-from backend.app.textual_inversion import read_embedding,apply_embeddings,embedding_tokenizers
+from backend.app.inference.conditioning.textual_inversion import read_embedding, apply_embeddings, embedding_tokenizers
 
 
 def tokenizer():
@@ -37,7 +37,7 @@ class EmbeddingTests(unittest.TestCase):
             values={'clip_l':torch.ones(2,768),'clip_g':torch.full((2,1280),2.)}
             selection=self.write(Path(temp),values);pipe=Pipe()
             originals=[t.get_vocab().copy() for t in (pipe.tokenizer,pipe.tokenizer_2)]
-            with patch('backend.app.prompt_tokens.tokenizers',return_value=[pipe.tokenizer,pipe.tokenizer_2]):
+            with patch('backend.app.inference.conditioning.prompt_tokens.tokenizers',return_value=[pipe.tokenizer,pipe.tokenizer_2]):
                 clones=embedding_tokenizers('sdxl',[selection])
             self.assertEqual([t.get_vocab() for t in (pipe.tokenizer,pipe.tokenizer_2)],originals)
             self.assertTrue(all('<s0>' in t.get_vocab() for t in clones))

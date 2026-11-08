@@ -8,11 +8,21 @@ from PIL import Image
 from spandrel import ModelTiling
 from fastapi.testclient import TestClient
 from backend.app.worker import tiled_upscale
-from backend.app.prompt_tokens import count_tokens, tokenizers
+from backend.app.inference.conditioning.prompt_tokens import count_tokens, tokenizers
 from backend.app.main import create_app
 
 
 class TilesTokensTests(unittest.TestCase):
+    def test_portrait_above_1024_keeps_all_tiles(self):
+        class Model:
+            tiling = ModelTiling.SUPPORTED
+            def __call__(self, tensor):
+                return tensor.repeat_interleave(2,-1).repeat_interleave(2,-2)
+        pixels=np.random.default_rng(43).integers(0,256,(1216,64,3),dtype=np.uint8)
+        with patch.object(torch.Tensor,'cuda',lambda t:t):
+            result=tiled_upscale(Image.fromarray(pixels),Model(),2)
+        np.testing.assert_array_equal(np.asarray(result),pixels.repeat(2,axis=0).repeat(2,axis=1))
+
     def test_tiling_matches_local_filter_at_seams_and_preserves_alpha(self):
         class Model:
             tiling = ModelTiling.SUPPORTED

@@ -5,14 +5,14 @@ from pathlib import Path
 from unittest.mock import patch
 import numpy as np
 from PIL import Image
-from backend.app.detailer import decode,refine_regions,select_regions
+from backend.app.inference.postprocess.detailer import decode, refine_regions, select_regions
 from backend.app.models import preflight,scan
 from backend.app.jobs import original_artifacts
 
 
 class DetailerTests(unittest.TestCase):
     def test_krea_detail_conditioning_describes_the_crop_instead_of_a_whole_scene(self):
-        from backend.app.detailer import detail_prompt
+        from backend.app.inference.postprocess.detailer import detail_prompt
         scene='a woman in a field of flowers'
         self.assertIn('single hand',detail_prompt('hand',scene,'krea2'))
         self.assertNotIn(scene,detail_prompt('hand',scene,'krea2'))

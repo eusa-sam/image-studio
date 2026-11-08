@@ -10,21 +10,22 @@ import traceback
 from pathlib import Path
 
 
-def serve(folder):
+def serve(folder,data_root=None):
     folder=Path(folder).resolve()
     from .models import ROOT
-    runtime=(ROOT/'data/runtime').resolve()
+    data_root=Path(data_root or ROOT/'data').resolve()
+    runtime=(data_root/'runtime').resolve()
     if not folder.is_relative_to(runtime):raise ValueError('Invalid worker directory')
     folder.mkdir(parents=True,exist_ok=True)
     os.environ['HF_HOME']=str(folder/'hf-cache')
     os.environ['HF_HUB_CACHE']=str(folder/'hf-cache/hub')
     from .offline import install_guard
     install_guard(folder/'network-audit.jsonl')
-    from .pipeline_cache import PipelineCache
+    from backend.app.inference.runtime.pipeline_cache import PipelineCache
     from .worker import run
     # This host can deadlock NumPy DLL loading while another thread blocks on stdin.
     import numpy
-    cache=PipelineCache(ROOT/'data/indexes/model-verification')
+    cache=PipelineCache(data_root/'indexes/model-verification')
     commands=queue.Queue()
     def read_commands():
         for line in sys.stdin.buffer:
@@ -65,4 +66,4 @@ def serve(folder):
         os.replace(temporary,work/'worker-done.json')
 
 
-if __name__=='__main__':serve(sys.argv[1])
+if __name__=='__main__':serve(sys.argv[1],sys.argv[2] if len(sys.argv)>2 else None)

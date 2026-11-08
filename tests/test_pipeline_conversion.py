@@ -5,7 +5,7 @@ from diffusers import (AutoencoderKL, DDIMScheduler, StableDiffusionPipeline,
                        StableDiffusionImg2ImgPipeline, StableDiffusionInpaintPipeline,
                        UNet2DConditionModel)
 
-from backend.app.memory_policy import convert_pipeline,fresh_scheduler
+from backend.app.inference.runtime.memory_policy import convert_pipeline, fresh_scheduler
 
 
 class PipelineConversionTests(unittest.TestCase):

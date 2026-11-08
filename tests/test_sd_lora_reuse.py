@@ -6,7 +6,7 @@ import torch
 from diffusers import StableDiffusionXLPipeline, UNet2DConditionModel, AutoencoderKL, DDIMScheduler
 from transformers import CLIPTextConfig, CLIPTextModel, CLIPTextModelWithProjection
 from safetensors.torch import save_file
-from backend.app.pipeline_cache import PipelineCache
+from backend.app.inference.runtime.pipeline_cache import PipelineCache
 
 
 class SDLoraReuseTests(unittest.TestCase):

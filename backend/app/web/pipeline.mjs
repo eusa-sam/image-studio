@@ -21,7 +21,7 @@ export function jobProgress(job) {
       count={value:p.step,max:p.total};label+=` · ${p.step}/${p.total} ${p.stage==='upscale'?'타일':'단계'}`;
     }
   }
-  const modes={full:'GPU 전체 적재',partial:'GPU·RAM 부분 적재',model_offload:'모델 단위 오프로딩',sequential_offload:'레이어 단위 오프로딩',block_offload:'일부 블록 GPU 상주',auto_model_offload:'가용 VRAM에 따라 자동 전환'};
+  const modes={full:'GPU 전체 적재',partial:'GPU·RAM 부분 적재',model_offload:'모델 단위 오프로딩',sequential_offload:'레이어 단위 오프로딩',block_offload:'일부 블록 GPU 상주',denoiser_resident:'생성 모델 GPU 상주',auto_model_offload:'가용 VRAM에 따라 자동 전환'};
   const policy=job.status==='RUNNING'?p.memory_policy:null;
   let memory=policy?modes[policy.mode] || '': '';
   if(memory)for(const [key,title] of [['free_vram_bytes','시작 시 가용 VRAM'],['resident_budget_bytes','가중치 VRAM 예산'],['cpu_cache_budget_bytes','RAM 캐시 상한']]) {

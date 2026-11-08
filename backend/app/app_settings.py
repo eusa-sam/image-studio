@@ -76,7 +76,7 @@ def validate_directories(settings,store):
 
 
 def apply_settings(settings,queue,chat):
-    from . import models,prompt_tokens
+    from backend.app import models; from backend.app.inference.conditioning import prompt_tokens
     models.MODEL_ROOT=Path(settings.model_path)
     prompt_tokens.MODEL_ROOT=models.MODEL_ROOT
     prompt_tokens.tokenizers.cache_clear()

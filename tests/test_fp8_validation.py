@@ -3,10 +3,32 @@ from pathlib import Path
 from unittest.mock import patch
 import torch
 from safetensors.torch import save_file
-from backend.app.quantized_weights import FileWeights,read_tensor
+from backend.app.inference.quantization.quantized_weights import FileWeights, read_tensor
 
 
 class FP8ValidationTests(unittest.TestCase):
+    def test_native_read_validates_on_target_before_cpu_cache_publication(self):
+        for device in ['cpu']+(['cuda:0'] if torch.cuda.is_available() else []):
+            for bits in (0,127):
+                with self.subTest(device=device,bits=bits),tempfile.TemporaryDirectory() as directory:
+                    path=Path(directory)/'fp8.safetensors'
+                    self.save(path,torch.full((16,16),bits,dtype=torch.uint8),.125)
+                    mapping=FileWeights(self.model(),str(path),lambda x:x,defer_numeric_validation=True)
+                    mapping.cpu_budget=4096
+                    with patch.object(mapping,'_checked_raw',wraps=mapping._checked_raw) as check,patch('backend.app.inference.runtime.memory_policy.available_ram',return_value=32*1024**3):
+                        if bits==127:
+                            with self.assertRaisesRegex(ValueError,'Nonfinite'):mapping.linear_packed('0.weight',device)
+                            self.assertFalse(mapping.native_cpu_cache);self.assertEqual(mapping.cpu_bytes,0)
+                        else:
+                            result=mapping.linear_packed('0.weight',device)
+                            self.assertTrue(mapping.native_cpu_cache)
+                            self.assertEqual(result[0].dtype,torch.float8_e4m3fn)
+                        self.assertEqual(str(check.call_args.args[1].device),device)
+                    if bits==0 and device=='cuda:0':
+                        mapping.packed_enabled=True;mapping.budget=4096
+                        with patch.object(mapping,'_checked_raw',side_effect=AssertionError('Owned CPU cache was already checked')):
+                            self.assertTrue(mapping._pack('0.weight',native=True))
+
     def test_all_encodings_and_small_scale_preserve_decoded_values(self):
         bits=torch.arange(256,dtype=torch.uint8).reshape(16,16)
         torch.testing.assert_close((bits&127)!=127,torch.isfinite(bits.view(torch.float8_e4m3fn).float()))
@@ -15,7 +37,7 @@ class FP8ValidationTests(unittest.TestCase):
             with self.subTest(device=device),tempfile.TemporaryDirectory() as directory:
                 path=Path(directory)/'fp8.safetensors'
                 self.save(path,finite,.125)
-                with patch('backend.app.quantized_weights.read_tensor',side_effect=AssertionError('Validation must not decode')):
+                with patch('backend.app.inference.quantization.quantized_weights.read_tensor',side_effect=AssertionError('Validation must not decode')):
                     mapping=FileWeights(self.model(),str(path),lambda x:x,validation_device=device)
                 self.assertEqual(mapping.statistics()['fp8_bound_validations'],1)
                 torch.testing.assert_close(mapping['0.weight'],(finite.view(torch.float8_e4m3fn).float()*.125).bfloat16(),rtol=0,atol=0)
@@ -28,7 +50,7 @@ class FP8ValidationTests(unittest.TestCase):
             path=Path(directory)/'fp8.safetensors'
             zeros=torch.zeros((16,16),dtype=torch.uint8)
             self.save(path,zeros,torch.finfo(torch.float32).max)
-            with patch('backend.app.quantized_weights.read_tensor',wraps=read_tensor) as decode:
+            with patch('backend.app.inference.quantization.quantized_weights.read_tensor',wraps=read_tensor) as decode:
                 mapping=FileWeights(self.model(),str(path),lambda x:x)
             self.assertEqual(decode.call_count,1);self.assertEqual(mapping.fp8_bound_validations,0)
             self.assertTrue(torch.equal(mapping['0.weight'],torch.zeros((16,16),dtype=torch.bfloat16)))
@@ -48,7 +70,7 @@ class FP8ValidationTests(unittest.TestCase):
             self.save(path,bits,147.)
             with self.assertRaisesRegex(ValueError,'overflows'):FileWeights(self.model(),str(path),lambda x:x,dtype=torch.float16)
             self.save(path,bits,.125)
-            with patch('backend.app.quantized_weights.read_tensor',wraps=read_tensor) as decode:
+            with patch('backend.app.inference.quantization.quantized_weights.read_tensor',wraps=read_tensor) as decode:
                 mapping=FileWeights(self.model(),str(path),lambda x:x,preload_budget=512)
             decode.assert_called_once();self.assertEqual(mapping.fp8_bound_validations,0)
 

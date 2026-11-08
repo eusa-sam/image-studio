@@ -11,6 +11,14 @@ from backend.app.jobs import JobQueue
 
 
 class ProgressTests(unittest.TestCase):
+    def test_residency_modes_are_exposed_to_polling_clients(self):
+        with tempfile.TemporaryDirectory() as directory:
+            job={'id':str(uuid4()),'status':'RUNNING'}
+            folder=Path(directory)/'runtime/jobs'/job['id'];folder.mkdir(parents=True)
+            for mode in ('denoiser_resident','block_offload'):
+                progress=Progress(folder);progress.policy={'mode':mode};progress.update('generate')
+                self.assertEqual(read_progress(directory,job)['memory_policy']['mode'],mode)
+
     def test_phase_times_accumulate_reentry_without_resetting_each_step(self):
         with tempfile.TemporaryDirectory() as folder,patch('backend.app.progress.time.monotonic') as clock:
             clock.return_value=0
@@ -52,7 +60,7 @@ class ProgressTests(unittest.TestCase):
 
     def test_jobs_api_exposes_only_running_job_progress(self):
         with tempfile.TemporaryDirectory() as directory,patch.object(JobQueue,'_loop'):
-            with TestClient(create_app(directory),base_url='http://127.0.0.1:8765') as client,patch('backend.app.main.execution_plan',return_value={'runner':'test'}):
+            with TestClient(create_app(directory,port=18765),base_url='http://127.0.0.1:18765') as client,patch('backend.app.main.execution_plan',return_value={'runner':'test'}):
                 session=client.post('/api/sessions',json={}).json()['ref']
                 receipt=client.post('/api/prompts',json=dict(session=session,prompt_id=str(uuid4()),request_id=str(uuid4()),
                     expected_revision=0,positive='test',settings={'model':'test'},generate=True)).json()
@@ -62,6 +70,8 @@ class ProgressTests(unittest.TestCase):
                 Progress(folder).update('upscale',step=2,total=4)
                 jobs=lambda:client.get('/api/jobs',params={'session':session}).json()
                 self.assertEqual(jobs()[0]['progress'],{'stage':'upscale','step':2,'total':4})
+                progress=Progress(folder);progress.policy={'mode':'denoiser_resident'};progress.update('generate',step=1,total=4)
+                self.assertEqual(jobs()[0]['progress']['memory_policy']['mode'],'denoiser_resident')
                 self.assertNotIn('progress',store.job(session,job_id)['state'])
                 client.post('/api/jobs/'+job_id+'/cancel',params={'session':session},json={})
                 self.assertNotIn('progress',jobs()[0])

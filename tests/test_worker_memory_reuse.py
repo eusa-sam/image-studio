@@ -8,6 +8,24 @@ class ReachedPipeline(Exception):pass
 
 
 class WorkerMemoryReuseTests(unittest.TestCase):
+    def test_sd_rebalances_pressure_and_recovers_capacity_without_reloading(self):
+        from backend.app.worker import _run
+        gb=1024**3
+        for family in ('sd1','sd2','sdxl'):
+            for mode,free,expected in [('full',16*gb,False),('model_offload',16*gb,True),('full',6*gb,True)]:
+                with self.subTest(family=family,mode=mode,free=free),tempfile.TemporaryDirectory() as directory:
+                    root=Path(directory);path=root/'request.json'
+                    path.write_text(json.dumps(dict(plan=dict(runner=family+'_txt2img',settings=dict(width=768,height=1024,flow='txt2img')),positive='same')))
+                    policy=dict(mode=mode,free_vram_bytes=8*gb,resident_budget_bytes=4*gb,activation_reserve_bytes=4*gb)
+                    pipe=SimpleNamespace(memory_policy=policy,scheduler=object())
+                    cache=Mock();cache.get.return_value=pipe;cache.suspended=False
+                    def suspend():cache.suspended=True;return True
+                    cache.suspend.side_effect=suspend
+                    with patch('backend.app.worker.verify_inputs',return_value=(root/'weight','checked',{},[])),patch('torch.cuda.is_available',return_value=True),patch('torch.cuda.reset_peak_memory_stats'),patch('torch.cuda.memory_reserved',return_value=0),patch('backend.app.inference.runtime.memory_policy.available_vram',return_value=(free,16*gb,{})),patch('backend.app.inference.runtime.memory_policy.available_ram',return_value=32*gb),patch('backend.app.inference.runtime.memory_policy.configure_pipeline',return_value=policy) as configure,patch('backend.app.inference.runtime.memory_policy.fresh_scheduler',side_effect=ReachedPipeline):
+                        with self.assertRaises(ReachedPipeline):_run(path,cache)
+                    self.assertEqual(cache.suspend.call_count,int(expected))
+                    self.assertEqual(configure.call_count,int(expected));self.assertFalse(cache.suspended)
+
     def test_klein_reuse_applies_current_lora_strength_after_resume(self):
         from backend.app.worker import _run
         gb=1024**3
@@ -19,7 +37,7 @@ class WorkerMemoryReuseTests(unittest.TestCase):
                 pipe=SimpleNamespace(memory_policy={'free_vram_bytes':16*gb},set_adapters=Mock(side_effect=ReachedPipeline))
                 cache=Mock();cache.get.return_value=pipe;cache.suspended=suspended
                 selections=[({'weight':strength},root/'style.safetensors')]
-                with patch('backend.app.worker.verify_inputs',return_value=(root/'bundle','checked',{},selections)),patch('torch.cuda.is_available',return_value=True),patch('torch.cuda.reset_peak_memory_stats'),patch('torch.cuda.memory_reserved',return_value=0),patch('backend.app.memory_policy.available_vram',return_value=(16*gb,16*gb,{})),patch('backend.app.memory_policy.available_ram',return_value=32*gb),patch('backend.app.flux2.resume_pipeline') as resume,patch('backend.app.flux2.load_pipeline') as load:
+                with patch('backend.app.worker.verify_inputs',return_value=(root/'bundle','checked',{},selections)),patch('torch.cuda.is_available',return_value=True),patch('torch.cuda.reset_peak_memory_stats'),patch('torch.cuda.memory_reserved',return_value=0),patch('backend.app.inference.runtime.memory_policy.available_vram',return_value=(16*gb,16*gb,{})),patch('backend.app.inference.runtime.memory_policy.available_ram',return_value=32*gb),patch('backend.app.inference.models.flux2.resume_pipeline') as resume,patch('backend.app.inference.models.flux2.load_pipeline') as load:
                     with self.assertRaises(ReachedPipeline):_run(path,cache)
                 pipe.set_adapters.assert_called_once_with(['lora_0'],adapter_weights=[strength])
                 self.assertEqual(cache.get.call_args.kwargs['replace_loras'],selections)
@@ -41,7 +59,7 @@ class WorkerMemoryReuseTests(unittest.TestCase):
                 def suspend():cache.suspended=True;return True
                 cache.suspend.side_effect=suspend
                 selections=[({'weight':.5},root/'style.safetensors')]
-                with patch('backend.app.worker.verify_inputs',return_value=(root/'bundle','checked',{},selections)),patch('torch.cuda.is_available',return_value=True),patch('torch.cuda.reset_peak_memory_stats'),patch('torch.cuda.memory_reserved',return_value=0),patch('backend.app.memory_policy.available_vram',return_value=(16*gb,16*gb,{})),patch('backend.app.memory_policy.available_ram',return_value=32*gb),patch('backend.app.'+module+'.resume_pipeline') as resume,patch('backend.app.'+module+'.load_pipeline') as load:
+                with patch('backend.app.worker.verify_inputs',return_value=(root/'bundle','checked',{},selections)),patch('torch.cuda.is_available',return_value=True),patch('torch.cuda.reset_peak_memory_stats'),patch('torch.cuda.memory_reserved',return_value=0),patch('backend.app.inference.runtime.memory_policy.available_vram',return_value=(16*gb,16*gb,{})),patch('backend.app.inference.runtime.memory_policy.available_ram',return_value=32*gb),patch('backend.app.inference.models.'+module+'.resume_pipeline') as resume,patch('backend.app.inference.models.'+module+'.load_pipeline') as load:
                     with self.assertRaises(ReachedPipeline):_run(path,cache)
                 cache.suspend.assert_called_once();resume.assert_called_once_with(pipe,768,1024)
                 load.assert_not_called();self.assertFalse(cache.suspended)
@@ -68,7 +86,7 @@ class WorkerMemoryReuseTests(unittest.TestCase):
                 cache=Mock();cache.get.return_value=pipe;cache.suspended=False
                 def suspend():cache.suspended=retained;return retained
                 cache.suspend.side_effect=suspend
-                with patch('backend.app.worker.MODEL_ROOT',root),patch('backend.app.worker.verify_inputs',return_value=(root/'weight','checked',{'clip':root/'clip','vae':root/'vae'},[])),patch('torch.cuda.is_available',return_value=True),patch('torch.cuda.reset_peak_memory_stats'),patch('torch.cuda.empty_cache'),patch('torch.cuda.memory_reserved',return_value=0),patch('backend.app.memory_policy.available_vram',return_value=(15*gb,16*gb,{})),patch('backend.app.memory_policy.available_ram',return_value=ram),patch('backend.app.krea2.resume_pipeline') as resume,patch('backend.app.krea2.load_pipeline',side_effect=ReachedPipeline) as load:
+                with patch('backend.app.worker.MODEL_ROOT',root),patch('backend.app.worker.verify_inputs',return_value=(root/'weight','checked',{'clip':root/'clip','vae':root/'vae'},[])),patch('torch.cuda.is_available',return_value=True),patch('torch.cuda.reset_peak_memory_stats'),patch('torch.cuda.empty_cache'),patch('torch.cuda.memory_reserved',return_value=0),patch('backend.app.inference.runtime.memory_policy.available_vram',return_value=(15*gb,16*gb,{})),patch('backend.app.inference.runtime.memory_policy.available_ram',return_value=ram),patch('backend.app.inference.models.krea2.resume_pipeline') as resume,patch('backend.app.inference.models.krea2.load_pipeline',side_effect=ReachedPipeline) as load:
                     with self.assertRaises(ReachedPipeline):_run(path,cache)
                 if should_resume:
                     resume.assert_called_once_with(pipe,(768,1024));load.assert_not_called()

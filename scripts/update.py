@@ -80,9 +80,12 @@ def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--runtime',type=Path,default=server.ROOT/'data/runtime/server')
     parser.add_argument('--data-root',type=Path,default=server.ROOT/'data')
-    parser.add_argument('--port',type=int,default=8765)
+    parser.add_argument('--port',type=int)
     args=parser.parse_args()
-    try:print(json.dumps(update(server.ROOT,args.runtime.resolve(),args.data_root.resolve(),args.port),indent=2))
+    try:
+        port=args.port if args.port is not None else server.default_port()
+        if not 1 <= port <= 65535:raise ValueError('Port must be from 1 to 65535')
+        print(json.dumps(update(server.ROOT,args.runtime.resolve(),args.data_root.resolve(),port),indent=2))
     except Exception as error:
         print('Update failed: '+str(error),file=sys.stderr);raise SystemExit(1)
 

@@ -3,7 +3,7 @@ from pathlib import Path
 from unittest.mock import patch
 import torch
 from safetensors.torch import save_file
-from backend.app.quantized_weights import FileWeights,load_local_weights
+from backend.app.inference.quantization.quantized_weights import FileWeights, load_local_weights
 
 class PackedWeightsTests(unittest.TestCase):
     def test_placeholder_binding_is_single_strict_assignment_after_validation(self):
@@ -36,7 +36,7 @@ class PackedWeightsTests(unittest.TestCase):
             with tempfile.TemporaryDirectory() as folder:
                 path=self.fixture(folder,int8)
                 mapping=FileWeights(self.model(),str(path),lambda x:x);mapping.limit_cpu_cache(size)
-                with patch('backend.app.memory_policy.available_ram',return_value=32*1024**3):
+                with patch('backend.app.inference.runtime.memory_policy.available_ram',return_value=32*1024**3):
                     raw,scale,group=mapping.linear_packed('0.weight','cpu')
                 mapping.packed_enabled=True;mapping.packed_int8_enabled=True;mapping.budget=size
                 with patch('safetensors.safe_open',side_effect=AssertionError('CPU cache must avoid disk reread')):
@@ -44,12 +44,12 @@ class PackedWeightsTests(unittest.TestCase):
                 torch.testing.assert_close(packed[0].cpu().float(),raw.float(),rtol=0,atol=0)
                 self.assertEqual(mapping.cpu_bytes,0);self.assertFalse(mapping.native_cpu_cache)
                 self.assertEqual(mapping.cache_bytes,size)
-                from backend.app.pipeline_cache import PipelineCache
+                from backend.app.inference.runtime.pipeline_cache import PipelineCache
                 from types import SimpleNamespace
                 cache=PipelineCache();cache.key='model';cache.positive='woman'
                 cache.pipe=SimpleNamespace(memory_policy={'mode':'partial'},weight_maps=[mapping])
                 cache.conditioning={'woman':{'prompt_embeds':torch.ones(1,2,device='cuda')}}
-                with patch('backend.app.memory_policy.available_ram',return_value=32*1024**3):
+                with patch('backend.app.inference.runtime.memory_policy.available_ram',return_value=32*1024**3):
                     self.assertTrue(cache.suspend())
                 self.assertEqual(mapping.cache_bytes,0);self.assertFalse(mapping.packed_cache)
                 self.assertEqual(mapping.cpu_bytes,size)
@@ -67,10 +67,10 @@ class PackedWeightsTests(unittest.TestCase):
                 values={'0.weight':raw,'0.weight_scale':scale,'0.comfy_quant':torch.tensor(list(json.dumps(metadata).encode()),dtype=torch.uint8)}
                 save_file(values,path)
                 with torch.device('meta'):model=torch.nn.Sequential(torch.nn.Linear(group,16,bias=False))
-                with patch('backend.app.quantized_weights.read_tensor',side_effect=AssertionError('bound must avoid dense validation')):
+                with patch('backend.app.inference.quantization.quantized_weights.read_tensor',side_effect=AssertionError('bound must avoid dense validation')):
                     mapping=FileWeights(model,str(path),lambda x:x)
                 self.assertEqual(mapping.int8_bound_validations,1)
-                from backend.app.quantized_weights import undo_convrot
+                from backend.app.inference.quantization.quantized_weights import undo_convrot
                 torch.testing.assert_close(mapping['0.weight'],(undo_convrot(raw.float(),group)*scale).bfloat16(),rtol=0,atol=0)
 
     def test_int8_bound_keeps_invalid_metadata_and_overflow_checks(self):
@@ -98,7 +98,7 @@ class PackedWeightsTests(unittest.TestCase):
             path=self.fixture(folder,True)
             mapping=FileWeights(self.model(),str(path),lambda x:x)
             mapping.limit_cpu_cache(320)
-            with patch('backend.app.memory_policy.available_ram',return_value=32*1024**3):
+            with patch('backend.app.inference.runtime.memory_policy.available_ram',return_value=32*1024**3):
                 raw,scale,group=mapping.linear_packed('0.weight','cpu')
                 again=mapping.linear_packed('0.weight','cpu')
             self.assertEqual(group,16);self.assertIs(raw,again[0])
@@ -140,14 +140,14 @@ class PackedWeightsTests(unittest.TestCase):
 
     def test_validated_quantized_cpu_reads_skip_revalidation_and_preserve_values(self):
         from safetensors import safe_open
-        from backend.app.quantized_weights import read_tensor
+        from backend.app.inference.quantization.quantized_weights import read_tensor
         for int8 in (False,True):
             with tempfile.TemporaryDirectory() as folder:
                 path=self.fixture(folder,int8)
                 mapping=FileWeights(self.model(),str(path),lambda x:x)
                 with safe_open(str(path),framework='pt',device='cpu') as reader:
                     expected=read_tensor(reader,'0.weight')
-                with patch('backend.app.quantized_weights.read_tensor',side_effect=AssertionError('already validated')):
+                with patch('backend.app.inference.quantization.quantized_weights.read_tensor',side_effect=AssertionError('already validated')):
                     torch.testing.assert_close(mapping['0.weight'],expected,rtol=0,atol=0)
                     torch.testing.assert_close(mapping['0.weight'],expected,rtol=0,atol=0)
                 path.write_bytes(b'changed')
@@ -160,8 +160,8 @@ class PackedWeightsTests(unittest.TestCase):
             with torch.device('meta'):model=torch.nn.Conv2d(2,2,3,bias=False)
             mapping=FileWeights(model,str(path),lambda x:x)
             mapping.limit_cpu_cache(2*2*3*3*2)
-            from backend.app.quantized_weights import read_tensor
-            with patch('backend.app.quantized_weights.read_tensor',wraps=read_tensor) as reader, patch('backend.app.memory_policy.available_ram',return_value=32*1024**3):
+            from backend.app.inference.quantization.quantized_weights import read_tensor
+            with patch('backend.app.inference.quantization.quantized_weights.read_tensor',wraps=read_tensor) as reader, patch('backend.app.inference.runtime.memory_policy.available_ram',return_value=32*1024**3):
                 first=mapping['weight']
                 for _ in range(12):self.assertIs(mapping['weight'],first)
                 self.assertEqual(reader.call_count,1)
@@ -201,7 +201,7 @@ class PackedWeightsTests(unittest.TestCase):
                 path=self.fixture(folder,int8)
                 eager=self.model();load_local_weights(eager,str(path),lambda x:x)
                 lazy=self.model()
-                with patch('backend.app.memory_policy.available_ram',return_value=32*1024**3):
+                with patch('backend.app.inference.runtime.memory_policy.available_ram',return_value=32*1024**3):
                     mapping=FileWeights(lazy,str(path),lambda x:x,preload_budget=512)
                 for model in (eager,lazy):
                     inject_adapter_in_model(LoraConfig(r=2,lora_alpha=2,target_modules=['0']),model,adapter_name='test')

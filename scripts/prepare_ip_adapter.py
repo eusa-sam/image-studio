@@ -42,7 +42,7 @@ def main():
         path=ROOT/'models'/relative
         if not path.exists():continue
         if kind=='clip_vision':
-            from backend.app.ip_adapter import load_vision
+            from backend.app.inference.conditioning.ip_adapter import load_vision
             encoder=load_vision(path,ROOT/'models/configs/ip_adapter/clip_vision_h/config.json')
             del encoder
         profile=path.with_name(path.name+'.profile.json')

@@ -3,7 +3,7 @@ from pathlib import Path
 from unittest.mock import patch
 import torch
 from safetensors.torch import save_file
-from backend.app.quantized_weights import FileWeights
+from backend.app.inference.quantization.quantized_weights import FileWeights
 
 class AdapterResidencyTests(unittest.TestCase):
     @unittest.skipUnless(torch.cuda.is_available(),'CUDA required')
@@ -19,15 +19,15 @@ class AdapterResidencyTests(unittest.TestCase):
             mapping.budget=size-1
             self.assertIs(mapping['adapter.weight'],original)
             mapping.budget=size;mapping.reserve=128
-            with patch('backend.app.quantized_weights.allocator_free_bytes',return_value=128+size-1):
+            with patch('backend.app.inference.quantization.quantized_weights.allocator_free_bytes',return_value=128+size-1):
                 self.assertIs(mapping['adapter.weight'],original)
-            with patch('backend.app.quantized_weights.allocator_free_bytes',return_value=128+size):
+            with patch('backend.app.inference.quantization.quantized_weights.allocator_free_bytes',return_value=128+size):
                 first=mapping['adapter.weight']
             self.assertTrue(first.is_cuda)
             self.assertEqual(mapping.cache_bytes,size)
             self.assertEqual(mapping.statistics()['adapter_gpu_bytes'],size)
             torch.testing.assert_close(first.cpu(),original,rtol=0,atol=0)
-            with patch('backend.app.quantized_weights.allocator_free_bytes',side_effect=AssertionError('reuse existing tensor')):
+            with patch('backend.app.inference.quantization.quantized_weights.allocator_free_bytes',side_effect=AssertionError('reuse existing tensor')):
                 self.assertIs(mapping['adapter.weight'],first)
             mapping.extra['other.weight']=original.clone()
             self.assertIs(mapping['other.weight'],mapping.extra['other.weight'])

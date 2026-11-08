@@ -3,7 +3,7 @@ from pathlib import Path
 from unittest.mock import patch
 import torch
 import accelerate.hooks as hooks
-from backend.app.offload import reuse_allocator,prefer_cudnn
+from backend.app.inference.runtime.offload import reuse_allocator, prefer_cudnn
 from backend.app.worker import run
 
 
@@ -27,15 +27,18 @@ class OffloadTests(unittest.TestCase):
                 hooks.set_module_tensor_to_device(model,'weight','cpu',value=torch.ones(3,3))
         self.assertIs(hooks.set_module_tensor_to_device,original)
 
-    def test_only_krea_worker_uses_policy_and_forwards_arguments(self):
+    def test_supported_workers_reuse_allocator_and_forward_arguments(self):
         with tempfile.TemporaryDirectory() as folder:
             path=Path(folder)/'request.json'
-            for runner,enabled in [('krea2_txt2img',True),('sdxl_txt2img',False)]:
+            for runner,enabled in [(family+'_txt2img',True) for family in ('krea2','sdxl','sd1','sd2','anima','flux2','zimage')]+[('unknown',False)]:
                 path.write_text(json.dumps({'plan':{'runner':runner}}))
                 with patch.object(hooks,'set_module_tensor_to_device') as setter:
                     def execute(request,cache=None):
                         self.assertEqual(request,path)
                         self.assertIsNone(cache)
+                        if enabled and not runner.startswith('sdxl_'):
+                            from torch.nn.attention import SDPBackend
+                            self.assertEqual(torch._C._get_sdp_priority_order()[0],int(SDPBackend.CUDNN_ATTENTION))
                         hooks.set_module_tensor_to_device('module','weight','cuda',value='value',tied_params_map={})
                         return 7
                     with patch('backend.app.worker._run',side_effect=execute):self.assertEqual(run(path),7)

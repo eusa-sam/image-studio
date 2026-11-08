@@ -3,6 +3,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Literal
 from uuid import UUID
+from scripts.server import default_port
 
 from fastapi import FastAPI, Request, Query
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse, Response
@@ -15,7 +16,7 @@ from .models import ROOT, Settings, scan
 from .storage import ConflictError, SessionStore
 from .chat import ChatInput, ChatService
 from .ollama import OllamaError
-from .prompt_tokens import count_tokens
+from backend.app.inference.conditioning.prompt_tokens import count_tokens
 from .app_settings import AppSettings,read_settings,validate_directories,apply_settings,settings_file
 
 
@@ -64,7 +65,9 @@ class PromptInput(BaseModel):
     generate: bool = False
 
 
-def create_app(data_root=None):
+def create_app(data_root=None, *, port=8765):
+    allowed_hosts = (f'127.0.0.1:{port}', f'localhost:{port}')
+    allowed_origins = tuple(f'http://{host}' for host in allowed_hosts)
     @asynccontextmanager
     async def lifespan(app):
         with SessionStore(data_root or ROOT / 'data') as store:
@@ -72,7 +75,7 @@ def create_app(data_root=None):
             app.state.store, app.state.queue = store, queue
             try:
                 app.state.chat = ChatService(store, queue)
-                from . import models,prompt_tokens
+                from backend.app import models; from backend.app.inference.conditioning import prompt_tokens
                 previous_model_root=models.MODEL_ROOT
                 app.state.preferences=read_settings(store)
                 apply_settings(app.state.preferences,queue,app.state.chat)
@@ -89,10 +92,10 @@ def create_app(data_root=None):
     @app.middleware('http')
     async def local_only(request: Request, call_next):
         host = request.headers.get('host', '')
-        if host not in ('127.0.0.1:8765', 'localhost:8765'):
+        if host not in allowed_hosts:
             return JSONResponse({'detail': 'Local host required'}, status_code=403)
         origin = request.headers.get('origin')
-        if origin and origin not in ('http://127.0.0.1:8765', 'http://localhost:8765'):
+        if origin and origin not in allowed_origins:
             return JSONResponse({'detail': 'Same origin required'}, status_code=403)
         if request.method in ('POST', 'PUT', 'PATCH'):
             if request.headers.get('content-type', '').split(';')[0] != 'application/json':
@@ -193,22 +196,22 @@ def create_app(data_root=None):
         try:
             if body.embeddings:
                 from .models import MODEL_ROOT,embedding_components
-                from .textual_inversion import embedding_tokenizers
+                from backend.app.inference.conditioning.textual_inversion import embedding_tokenizers
                 components=embedding_components(body.embeddings,scan(),body.family)
                 encoders=embedding_tokenizers(body.family,[(row,MODEL_ROOT/row['path']) for row in components.values()])
                 return count_tokens(body.positive,body.negative,encoders=encoders,family=body.family,mode=body.mode)
             if body.family=='krea2':
-                from .krea2 import count_prompt_tokens
+                from backend.app.inference.models.krea2 import count_prompt_tokens
                 return count_prompt_tokens(body.positive,body.negative)
             if body.family in ('flux2','zimage'):
-                if body.family=='zimage':from .z_image import count_prompt_tokens
-                else:from .flux2 import count_prompt_tokens
+                if body.family=='zimage':from backend.app.inference.models.z_image import count_prompt_tokens
+                else:from backend.app.inference.models.flux2 import count_prompt_tokens
                 from .models import MODEL_ROOT
                 model=next((m for m in scan() if m['id']==body.model and m['family']==body.family and m['available']),None)
                 if not model:return JSONResponse({'detail':'준비된 Klein/Z-Image bundle을 선택하세요.'},status_code=422)
                 return count_prompt_tokens(MODEL_ROOT/model['path'],body.positive,body.negative)
             if body.family=='anima':
-                from .anima import count_prompt_tokens
+                from backend.app.inference.models.anima import count_prompt_tokens
                 from .models import MODEL_ROOT
                 model=next((m for m in scan() if m['id']==body.model and m['family']=='anima' and m['available']),None)
                 if not model:return JSONResponse({'detail':'준비된 ANIMA bundle을 선택하세요.'},status_code=422)
@@ -303,7 +306,7 @@ def create_app(data_root=None):
             encoders=None
             if settings['embeddings']:
                 from .models import MODEL_ROOT
-                from .textual_inversion import embedding_tokenizers
+                from backend.app.inference.conditioning.textual_inversion import embedding_tokenizers
                 encoders=embedding_tokenizers(family,[(row,MODEL_ROOT/row['path']) for key,row in plan['components'].items() if key.startswith('embedding')])
             count_tokens(body.positive,body.negative,encoders=encoders,family=family,mode='weighted')
         if app.state.queue.failure:
@@ -354,8 +357,8 @@ def create_app(data_root=None):
     return app
 
 
-app = create_app()
+app = create_app(port=default_port())
 
 if __name__ == '__main__':
     import uvicorn
-    uvicorn.run(app, host='127.0.0.1', port=8765, access_log=False)
+    uvicorn.run(app, host='127.0.0.1', port=default_port(), access_log=False)

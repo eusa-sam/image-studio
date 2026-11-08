@@ -7,7 +7,7 @@ from PIL import Image
 from backend.app.storage import SessionStore,digest,encode
 from backend.app.models import Settings
 from backend.app.jobs import execution_plan
-from backend.app.ip_adapter import reference_image
+from backend.app.inference.conditioning.ip_adapter import reference_image
 from backend.app.masks import save_mask,read_mask
 
 

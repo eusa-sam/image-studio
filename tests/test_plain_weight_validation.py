@@ -6,7 +6,7 @@ from unittest.mock import patch
 
 import torch
 from safetensors.torch import save_file
-from backend.app.quantized_weights import FileWeights, read_tensor
+from backend.app.inference.quantization.quantized_weights import FileWeights, read_tensor
 
 
 class PlainValidationTests(unittest.TestCase):
@@ -33,7 +33,7 @@ class PlainValidationTests(unittest.TestCase):
             path = Path(folder) / 'weights.safetensors'
             expected = torch.arange(4, dtype=torch.bfloat16).reshape(2, 2)
             save_file({'weight': expected}, path)
-            with patch('backend.app.quantized_weights.read_tensor', wraps=read_tensor) as read:
+            with patch('backend.app.inference.quantization.quantized_weights.read_tensor', wraps=read_tensor) as read:
                 mapping = FileWeights(self.model(), path, lambda x: x, defer_numeric_validation=True)
                 read.assert_not_called()
                 torch.testing.assert_close(mapping['weight'], expected, rtol=0, atol=0)

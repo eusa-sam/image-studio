@@ -1,4 +1,4 @@
-"""Allocator policy for the isolated, single-job Krea2 worker."""
+"""Allocator policy for the isolated, single-job image worker."""
 from contextlib import contextmanager
 from functools import partial
 

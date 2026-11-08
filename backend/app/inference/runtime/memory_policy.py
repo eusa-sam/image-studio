@@ -61,11 +61,86 @@ def residency_plan(free_bytes, total_bytes, weight_bytes, width, height, free_ra
                 cpu_cache_budget_bytes=min(16*gib,max(0,free_ram-8*gib)))
 
 
+def cached_storage_bytes(pipe,device):
+    """Count storage once across original, derived, and transfer caches."""
+    import torch
+    state=getattr(pipe,'__dict__',{});storages={}
+    def collect(value):
+        if isinstance(value,torch.Tensor) and value.device.type==device:
+            storage=value.untyped_storage()
+            storages[(value.device.index,storage.data_ptr())]=storage.nbytes()
+        elif isinstance(value,dict):
+            for item in value.values():collect(item)
+        elif isinstance(value,(list,tuple)):
+            for item in value:collect(item)
+    for entry in state.get('_cpu_weights',()):collect(entry[-1])
+    for mapping in state.get('weight_maps',()):
+        for name in ('cache','native_cpu_cache','packed_cache','extra','extra_gpu','derived_cpu_cache','derived_gpu_cache'):
+            collect(getattr(mapping,name,{}))
+    transfer=state.get('_weight_transfer')
+    if transfer is not None:collect(getattr(transfer,device+'_tensors',()))
+    pending=sum(getattr(mapping,'pending_cpu_bytes',0) for mapping in state.get('weight_maps',())) if device=='cpu' else 0
+    return sum(storages.values())+pending
+
+
+def cache_budget_fits(pipe,*,cpu=0,gpu=0,temporary=0):
+    if min(cpu,gpu,temporary)<0:raise ValueError('Negative cache allocation')
+    policy=pipe.memory_policy
+    if cpu and retained_bytes(pipe,'cpu')+cpu>policy['cpu_cache_budget_bytes']:return False
+    if (gpu or temporary) and retained_bytes(pipe,'cuda')+gpu+temporary>policy['resident_budget_bytes']:return False
+    return True
+
+
+def cache_allocation_fits(pipe,*,cpu=0,gpu=0,temporary=0):
+    import torch
+    if not cache_budget_fits(pipe,cpu=cpu,gpu=gpu,temporary=temporary):return False
+    if cpu and available_ram()<8*1024**3+cpu:return False
+    if gpu or temporary:
+        free=torch.cuda.mem_get_info()[0]+max(0,torch.cuda.memory_reserved()-torch.cuda.memory_allocated())
+        if free<pipe.memory_policy['activation_reserve_bytes']+gpu+temporary:return False
+    return True
+
+
+def retained_bytes(pipe,device):
+    maps=getattr(pipe,'weight_maps',())
+    if not maps or any(not hasattr(mapping,'extra_cpu_bytes') for mapping in maps):return cached_storage_bytes(pipe,device)
+    if device=='cpu':
+        size=sum(mapping.cpu_bytes+mapping.extra_cpu_bytes+getattr(mapping,'derived_cpu_bytes',0)+getattr(mapping,'pending_cpu_bytes',0) for mapping in maps)
+        size+=getattr(pipe,'_cpu_weight_bytes',0)
+    else:size=sum(mapping.cache_bytes+getattr(mapping,'derived_gpu_bytes',0) for mapping in maps)
+    transfer=getattr(pipe,'__dict__',{}).get('_weight_transfer')
+    if transfer is not None:size+=sum(v.numel()*v.element_size() for v in getattr(transfer,device+'_tensors',()))
+    return size
+
+
+def reclaim_gpu(pipe,*,temporary):
+    """Release file-backed/CPU-backed caches only when temporary work needs their space."""
+    if cache_allocation_fits(pipe,temporary=temporary):return True
+    for mapping in reversed(pipe.weight_maps):
+        for field in ('derived_gpu_cache','packed_cache','extra_gpu','cache'):
+            values=getattr(mapping,field,{})
+            for key in reversed(list(values)):
+                value=values[key]
+                if field=='cache' and not value.is_cuda:continue
+                tensors=value[:2] if isinstance(value,tuple) else (value,)
+                size=sum(tensor.numel()*tensor.element_size() for tensor in tensors)
+                del values[key]
+                if field!='derived_gpu_cache':mapping.cache_bytes-=size
+                else:mapping.derived_gpu_bytes-=size
+                mapping.reclaimed_gpu_bytes=getattr(mapping,'reclaimed_gpu_bytes',0)+size
+                del value,tensors
+                if cache_allocation_fits(pipe,temporary=temporary):return True
+    return False
+
+
 def needs_vram_rebalance(policy, free_bytes):
     previous=policy.setdefault('free_vram_with_allocator_bytes',policy['free_vram_bytes'])
     change=free_bytes-previous
-    # Reclaim a useful amount at once; respond to pressure at the existing threshold.
-    return change < -256*1024**2 or (policy.get('mode')!='full' and change > 1024**3)
+    # Initialization can consume spare capacity without invalidating the planned reserve.
+    required=policy.get('resident_budget_bytes',previous)+policy.get('activation_reserve_bytes',0)
+    if policy.get('mode') in ('full','denoiser_resident') and 'weight_bytes' in policy:
+        required=policy['weight_bytes']+policy['activation_reserve_bytes']
+    return (change < -256*1024**2 and free_bytes < required) or (policy.get('mode') not in ('full','denoiser_resident') and change > 1024**3)
 
 
 def fresh_scheduler(scheduler):

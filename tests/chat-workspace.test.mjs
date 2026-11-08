@@ -24,6 +24,44 @@ function fixture() {
 }
 const deferred=()=>{let resolve,reject;const promise=new Promise((a,b)=>{resolve=a;reject=b;});return {promise,resolve,reject};};
 
+test('failed model connection does not leave the model summary loading',async()=>{
+ const f=fixture();f.$('llm-model').value='';
+ f.api(async()=>({models:[],error:'connection refused'}));await f.chat.connect();
+ assert.equal(f.$('chat-model-name').textContent,'대화 모델을 연결해 주세요');
+ assert.equal(f.$('llm-status').textContent,'connection refused');
+});
+
+test('reasoning uses the server values without aliases and falls back to default when absent',async()=>{
+ const f=fixture();await f.chat.refresh();
+ f.api(async()=>({capabilities:['completion','thinking'],thinking:{values:[false,true,'low','medium','high'],default:'high',labels:{high:'xhigh'}}}));
+ await f.$('llm-model').onchange();
+ const option=f.$('llm-think').children.find(row=>row.textContent==='high');
+ assert.equal(option.value,'"high"');assert.match(f.$('llm-think').children[0].textContent,/high/);
+ assert.equal(f.$('llm-think').children.some(row=>row.textContent==='xhigh'),false);
+ f.$('llm-think').value=option.value;f.$('chat-input').value='test';let body;
+ f.transport(async request=>{body=request;return {status:'SUCCEEDED'};});
+ f.api(async()=>[]);await f.$('chat-form').onsubmit({preventDefault(){}});
+ assert.equal(body.think,'high');
+ f.api(async()=>({capabilities:['completion','thinking']}));await f.$('llm-model').onchange();
+ assert.equal(f.$('llm-think').children.length,1);assert.equal(f.$('llm-think').value,'null');
+ assert.match(f.$('llm-capabilities').textContent,/서버가 선택지를 제공하지 않아/);
+});
+
+test('explicit workspace switch clears loading after the latest history request only',async()=>{
+ const f=fixture();await f.chat.refresh();
+ f.setSession('B');f.chat.switchWorkspace();
+ assert.equal(f.$('llm-status').textContent,'대화 기록을 불러오는 중…');
+ const stale=deferred(),latest=deferred();let calls=0;
+ f.api(()=>++calls===1?stale.promise:latest.promise);
+ const first=f.chat.refresh(),second=f.chat.refresh();
+ stale.resolve([]);await first;
+ assert.equal(f.$('llm-status').textContent,'대화 기록을 불러오는 중…');
+ latest.resolve([]);await second;
+ assert.equal(f.$('llm-status').textContent,'이어서 이야기해 주세요.');
+ f.$('llm-status').textContent='연결 실패';f.api(async()=>[]);await f.chat.refresh();
+ assert.equal(f.$('llm-status').textContent,'연결 실패');
+});
+
 test('chat images open scoped previews without replacing the conversation',async()=>{
  const f=fixture(),session='2026-11/workspace A';f.setSession(session);
  const turn={id:'images',message:'compare',reply:'done',status:'SUCCEEDED',context:{session},
@@ -347,7 +385,11 @@ test('reasoning streams separately and survives refreshing the active workspace'
  f.transport((body,onEvent)=>{emit=onEvent;return pending.promise;});
  f.$('chat-input').value='reason about this';
  const send=f.$('chat-form').onsubmit({preventDefault(){}});
+ emit({type:'status',code:'cpu_fallback',text:'Ollama CPU 실행 중'});
  emit({type:'reasoning',text:'first '});emit({type:'reasoning',text:'second'});
+ assert.equal(f.$('llm-status').textContent,'Ollama CPU 실행 중');
+ emit({type:'reply',text:'answer'});
+ assert.equal(f.$('llm-status').textContent,'Ollama CPU 실행 중');
  let panel=f.$('chat-history').children.at(-1).children[1].children[1];
  assert.equal(panel.children[1].textContent,'first second');
  await f.chat.refresh();

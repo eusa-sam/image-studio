@@ -5,7 +5,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import patch
 
-from backend.app import prompt_tokens
+from backend.app.inference.conditioning import prompt_tokens
 
 
 @contextmanager

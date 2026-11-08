@@ -8,7 +8,7 @@ from fastapi.testclient import TestClient
 from backend.app.main import create_app
 from backend.app.app_settings import AppSettings,export_images
 from backend.app.storage import SessionStore,digest
-from backend.app import models,prompt_tokens
+from backend.app import models; from backend.app.inference.conditioning import prompt_tokens
 from backend.app.ollama import Ollama
 
 

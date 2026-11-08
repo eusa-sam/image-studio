@@ -51,11 +51,11 @@ def verify_inputs(plan,cache=None,verified_components=None):
         print('Hashing checkpoint',flush=True)
         if path.is_dir():
             if plan['runner'].startswith(('flux2_','zimage_')):
-                if plan['runner'].startswith('zimage_'):from .z_image import verify_bundle
-                else:from .flux2 import verify_bundle
+                if plan['runner'].startswith('zimage_'):from backend.app.inference.models.z_image import verify_bundle
+                else:from backend.app.inference.models.flux2 import verify_bundle
                 verify_bundle(path,cache=cache)
             else:
-                from .anima import verify_bundle
+                from backend.app.inference.models.anima import verify_bundle
                 verify_bundle(path,cache=cache)
             model_hash=hashlib.sha256((path/'download_manifest.json').read_bytes()).hexdigest()
         elif cache is not None:model_hash=cache.file_hash(path)
@@ -89,8 +89,6 @@ def tiled_upscale(image, model, scale, tile_size=256, halo=32, progress=None):
     if tile_size < 1 or halo < 0 or scale not in (1,2,3,4):
         raise ValueError('잘못된 타일/배율 설정')
     width, height = image.size
-    if max(width,height) > 1024:
-        raise ValueError('업스케일 입력은 최대 1024px입니다.')
     if max(width,height) > tile_size and model.tiling != ModelTiling.SUPPORTED:
         raise ValueError('이 업스케일 모델은 타일 실행을 권장하지 않습니다.')
     source = np.asarray(image.convert('RGB'))
@@ -139,17 +137,29 @@ def parent_watch():
 
 
 def pipeline_output(pipe,*,on_step=None,**arguments):
-    from .quantized_weights import weight_readers
+    from contextlib import nullcontext
+    from backend.app.inference.quantization.quantized_weights import weight_readers
+    from backend.app.inference.runtime.vae_policy import adaptive_decode
+    from backend.app.inference.runtime.execution import pipeline_phases
     if getattr(pipe,'memory_policy',{}).get('family')=='anima' and arguments.get('image') is not None:
         arguments.setdefault('width',arguments['image'].width)
         arguments.setdefault('height',arguments['image'].height)
-    with weight_readers():
+    decode=adaptive_decode(pipe.vae) if getattr(pipe,'memory_policy',{}).get('family')=='anima' else nullcontext()
+    with weight_readers(),decode,pipeline_phases(pipe):
         if getattr(pipe,'memory_policy',{}).get('int8_compute')=='native_convrot_with_bf16_fallback':
-            from .weight_prefetch import prefetch_weights
+            from backend.app.inference.quantization.weight_prefetch import prefetch_weights
+            from backend.app.inference.models.krea2_vae import vectorized_blending
+            from backend.app.inference.conditioning.krea2_tokens import compact_tokens
+            packed=pipe.weight_maps[0].packed_sources
+            transfer=prefetch_weights
             pipe.memory_policy['weight_prefetch']='bounded_cpu_read_ahead'
-            with prefetch_weights(pipe):return pipe(**arguments)
+            if any(info[2] for info in packed.values()):
+                from backend.app.inference.quantization.staging import staging_weights
+                transfer=staging_weights
+            tokens=compact_tokens(pipe) if packed else nullcontext()
+            with tokens,transfer(pipe),vectorized_blending(pipe.vae):return pipe(**arguments)
         if on_step is not None and getattr(pipe,'memory_policy',{}).get('family')=='anima':
-            from .anima import progress_reporting
+            from backend.app.inference.models.anima import progress_reporting
             with progress_reporting(pipe,on_step):return pipe(**arguments)
         return pipe(**arguments)
 
@@ -164,22 +174,27 @@ def run(request_path,cache=None):
         if not root.is_absolute() or not root.is_dir():raise ValueError('Invalid configured model folder')
         if root.resolve()!=MODEL_ROOT.resolve() and cache is not None:cache.clear()
         MODEL_ROOT=root.resolve()
-        from . import models,prompt_tokens
+        from backend.app import models; from backend.app.inference.conditioning import prompt_tokens
         models.MODEL_ROOT=prompt_tokens.MODEL_ROOT=MODEL_ROOT
         prompt_tokens.tokenizers.cache_clear()
     if request['plan']['runner'].startswith('krea2_'):
-        from .offload import reuse_allocator,prefer_cudnn
-        with reuse_allocator(),prefer_cudnn():
+        from backend.app.inference.runtime.offload import reuse_allocator, prefer_cudnn
+        from backend.app.inference.models.krea2_rotary import fused_rotary
+        with reuse_allocator(),prefer_cudnn(),fused_rotary():
             try:
                 return _run(request_path,cache) if cache is not None else _run(request_path)
             except BaseException:
                 if cache is not None:cache.clear()
                 raise
     if request['plan']['runner'].startswith(('flux2_','zimage_','sdxl_','sd1_','sd2_','anima_')):
-        try:return _run(request_path,cache)
-        except BaseException:
-            if cache is not None:cache.clear()
-            raise
+        from contextlib import nullcontext
+        from backend.app.inference.runtime.offload import reuse_allocator, prefer_cudnn
+        attention=nullcontext() if request['plan']['runner'].startswith('sdxl_') else prefer_cudnn()
+        with reuse_allocator(),attention:
+            try:return _run(request_path,cache)
+            except BaseException:
+                if cache is not None:cache.clear()
+                raise
     if cache is not None:cache.clear()
     return _run(request_path)
 
@@ -205,6 +220,7 @@ def _run(request_path,cache=None):
         faulthandler.dump_traceback_later(30)
         try:
             import torch
+            torch.set_num_threads(4)
             import diffusers
             import numpy as np
             from diffusers import StableDiffusionXLPipeline, StableDiffusionXLImg2ImgPipeline, StableDiffusionPipeline, StableDiffusionImg2ImgPipeline, AutoencoderKL
@@ -212,11 +228,10 @@ def _run(request_path,cache=None):
         if early_encoder:
             resolved,_=verified_components.result()
             if not torch.cuda.is_available():raise RuntimeError('CUDA GPU를 사용할 수 없습니다.')
-            from .krea2 import prepare_encoder
+            from backend.app.inference.models.krea2 import prepare_encoder
             config=MODEL_ROOT/'configs/krea2'
             if hashlib.sha256((config/'manifest.json').read_bytes()).hexdigest()!=plan['config_sha256']:
                 raise ValueError('KREA2_CONFIG_CHANGED')
-            torch.set_num_threads(4)
             torch.cuda.reset_peak_memory_stats()
             status.update('condition')
             prepared_encoder=prepare_encoder(resolved['clip'],config,request['positive'])
@@ -230,19 +245,18 @@ def _run(request_path,cache=None):
     manager=None
     memory_policy=None
     if family=='krea2':
-        from .krea2 import load_pipeline
+        from backend.app.inference.models.krea2 import load_pipeline
         config=MODEL_ROOT/'configs/krea2'
         if model_hash!=plan['krea2']['sha256']:raise ValueError('KREA2_HASH_MISMATCH')
         if hashlib.sha256((config/'manifest.json').read_bytes()).hexdigest()!=plan['config_sha256']:
             raise ValueError('KREA2_CONFIG_CHANGED')
-        torch.set_num_threads(4)
         resolution=generation_resolution(settings,resolved)
         pipe=None
         if cache is not None:
             key=cache.identity(plan,resolution)
-            pipe=cache.get(key,request['positive'])
+            pipe=cache.get(key,request['positive'],replace_loras=loras)
             if pipe is not None and not cache.suspended:
-                from .memory_policy import available_vram,available_ram,needs_vram_rebalance
+                from backend.app.inference.runtime.memory_policy import available_vram, available_ram, needs_vram_rebalance
                 free=available_vram()[0]+torch.cuda.memory_reserved()
                 host_free=available_ram()
                 if host_free<8*1024**3:
@@ -253,7 +267,7 @@ def _run(request_path,cache=None):
                                           free_ram_bytes=host_free,retained_on_cpu=retained)),flush=True)
                     if not retained:pipe=None
             if pipe is not None and cache.suspended:
-                from .krea2 import resume_pipeline
+                from backend.app.inference.models.krea2 import resume_pipeline
                 resume_pipeline(pipe,resolution)
                 cache.suspended=False
             if pipe is None:
@@ -265,21 +279,25 @@ def _run(request_path,cache=None):
             if cache is not None:
                 cache.key,cache.pipe,cache.positive=key,pipe,request['positive']
                 if prepared_encoder is not None:cache.conditioning[request['positive']]=prepared_encoder[3]
+        if reused and loras:
+            from backend.app.inference.conditioning.lora import set_lora_weights
+            set_lora_weights(pipe,loras)
         for mapping in pipe.weight_maps:
             mapping.native_hits=0
             mapping.native_layers.clear()
+            if reused:
+                mapping.fp8_hits=0;mapping.fp8_layers.clear();mapping.fp8_fallbacks=0
         memory_policy=pipe.memory_policy
-        from .memory_policy import available_vram
+        from backend.app.inference.runtime.memory_policy import available_vram
         memory_policy.setdefault('free_vram_with_allocator_bytes',available_vram()[0]+torch.cuda.memory_reserved())
         memory_policy.update(allocator_cache='reuse_within_job',tensor_transfer='blocking',pipeline_reused=reused,
                              attention_policy='cudnn_first_with_native_fallback')
         print(json.dumps(dict(memory_policy=pipe.memory_policy)),flush=True)
         pipe.vae.enable_tiling()
     elif family in ('flux2','zimage'):
-        if family=='zimage':from .z_image import load_pipeline,resume_pipeline
-        else:from .flux2 import load_pipeline,resume_pipeline
-        from .memory_policy import available_vram,available_ram,needs_vram_rebalance
-        torch.set_num_threads(4)
+        if family=='zimage':from backend.app.inference.models.z_image import load_pipeline, resume_pipeline
+        else:from backend.app.inference.models.flux2 import load_pipeline, resume_pipeline
+        from backend.app.inference.runtime.memory_policy import available_vram, available_ram, needs_vram_rebalance
         resolution=settings['width'],settings['height']
         pipe=None
         if cache is not None:
@@ -297,26 +315,26 @@ def _run(request_path,cache=None):
             pipe=load_pipeline(path,*resolution,loras=loras)
             if cache is not None:cache.key,cache.pipe,cache.positive=key,pipe,request['positive']
         if reused and loras:
-            from .lora import set_lora_weights
+            from backend.app.inference.conditioning.lora import set_lora_weights
             set_lora_weights(pipe,loras)
         memory_policy=pipe.memory_policy
         memory_policy.setdefault('free_vram_with_allocator_bytes',available_vram()[0]+torch.cuda.memory_reserved())
         memory_policy['pipeline_reused']=reused
         print(json.dumps(dict(memory_policy=memory_policy)),flush=True)
     elif family=='anima':
-        from .anima import load_pipeline,configure_pipeline
+        from backend.app.inference.models.anima import load_pipeline, configure_pipeline
         bundle=path
         if plan.get('anima'):
             bundle=(MODEL_ROOT/plan['anima']['bundle']).resolve()
             if not bundle.is_relative_to(MODEL_ROOT.resolve()) or fingerprint(bundle)!=plan['bundle_fingerprint']:
                 raise ValueError('ANIMA_BUNDLE_CHANGED')
             if model_hash!=plan['anima']['sha256']:raise ValueError('ANIMA_HASH_MISMATCH')
-            from .anima import verify_bundle
+            from backend.app.inference.models.anima import verify_bundle
             verify_bundle(bundle,cache=cache)
         resolution=generation_resolution(settings,resolved)
         pipe=None
         if cache is not None:
-            from .memory_policy import available_ram
+            from backend.app.inference.runtime.memory_policy import available_ram
             key=cache.identity(plan,resolution)
             pipe=cache.get(key,request['positive'],replace_loras=loras)
             if pipe is not None and available_ram()<8*1024**3:
@@ -331,11 +349,13 @@ def _run(request_path,cache=None):
             if cache is not None:cache.key,cache.pipe,cache.positive=key,pipe,request['positive']
         else:manager=pipe.anima_manager
         if reused and loras:
-            from .lora import set_lora_weights
+            from backend.app.inference.conditioning.lora import set_lora_weights
             set_lora_weights(pipe,loras)
         from diffusers import ClassifierFreeGuidance
-        from .memory_policy import fresh_scheduler
-        pipe.update_components(guider=ClassifierFreeGuidance(guidance_scale=settings['guidance']),scheduler=fresh_scheduler(pipe.scheduler))
+        # Re-registering the scheduler resets the manager's calibrated offload reserve.
+        if pipe.guider.config.guidance_scale!=settings['guidance']:
+            pipe.update_components(guider=ClassifierFreeGuidance(guidance_scale=settings['guidance']))
+            configure_pipeline(pipe,resolution)
         memory_policy=pipe.memory_policy
         memory_policy['pipeline_reused']=reused
         print(json.dumps(dict(memory_policy=memory_policy)),flush=True)
@@ -349,7 +369,7 @@ def _run(request_path,cache=None):
             from diffusers import StableDiffusionInpaintPipeline
             pipeline_class = StableDiffusionInpaintPipeline
         config = MODEL_ROOT / 'configs' / (family+'-inpaint' if plan.get('inpaint_channels') == 9 else family)
-        from .memory_policy import configure_pipeline,available_vram,available_ram,fresh_scheduler
+        from backend.app.inference.runtime.memory_policy import configure_pipeline, available_vram, available_ram, fresh_scheduler, needs_vram_rebalance
         resolution=generation_resolution(settings,resolved)
         if 'ip_adapter' in resolved:
             vision_config=MODEL_ROOT/'configs/ip_adapter/clip_vision_h/config.json'
@@ -359,7 +379,7 @@ def _run(request_path,cache=None):
             cache_key=cache.identity(plan,resolution)
             pipe=cache.get(cache_key,request['positive'],replace_loras=loras)
             if pipe is not None and not cache.suspended:
-                if available_vram()[0]+torch.cuda.memory_reserved()<pipe.memory_policy['free_vram_bytes']-256*1024**2 or available_ram()<8*1024**3:
+                if needs_vram_rebalance(pipe.memory_policy,available_vram()[0]+torch.cuda.memory_reserved()) or available_ram()<8*1024**3:
                     if not cache.suspend():pipe=None
             if pipe is not None and cache.suspended:
                 pipe.memory_policy=configure_pipeline(pipe,*resolution)
@@ -374,28 +394,30 @@ def _run(request_path,cache=None):
                 pipe.vae = AutoencoderKL.from_single_file(str(resolved['vae']), config=str(config / 'vae'),
                                                         local_files_only=True, torch_dtype=torch.float16)
             pipe.scheduler = type(pipe.scheduler).from_config(pipe.scheduler.config, prediction_type=settings['prediction_type'])
-            from .text_encoder import replace_encoder
+            from backend.app.inference.conditioning.text_encoder import replace_encoder
             for key,attribute in (('clip','text_encoder'),('clip2','text_encoder_2')):
                 if key in resolved:replace_encoder(getattr(pipe,attribute),resolved[key])
-            from .lora import apply_loras
+            from backend.app.inference.conditioning.lora import apply_loras
             apply_loras(pipe, loras)
             if settings.get('embeddings'):
-                from .textual_inversion import apply_embeddings
+                from backend.app.inference.conditioning.textual_inversion import apply_embeddings
                 apply_embeddings(pipe,[(components[key],resolved[key]) for key in components if key.startswith('embedding')],family)
             if 'ip_adapter' in resolved:
-                from .ip_adapter import attach_adapter
+                from backend.app.inference.conditioning.ip_adapter import attach_adapter
                 attach_adapter(pipe,resolved['ip_adapter'],resolved['clip_vision'],vision_config,settings['ip_adapter_scale'])
             pipe.memory_policy=configure_pipeline(pipe,*resolution)
             if cache is not None:cache.key,cache.pipe,cache.positive=cache_key,pipe,request['positive']
         if 'ip_adapter' in resolved:pipe.set_ip_adapter_scale(settings['ip_adapter_scale'])
         if reused and loras:
-            from .lora import set_lora_weights
+            from backend.app.inference.conditioning.lora import set_lora_weights
             set_lora_weights(pipe,loras)
         pipe.scheduler=fresh_scheduler(pipe.scheduler)
         memory_policy=pipe.memory_policy
         memory_policy.update(family=family,pipeline_reused=reused)
         print(json.dumps(dict(memory_policy=memory_policy)),flush=True)
         pipe.vae.enable_tiling()
+    from backend.app.inference.runtime.execution import enter_phase
+    enter_phase(pipe,'idle')
     status.policy=memory_policy
     status.update('condition')
     image_args = {'width':settings['width'], 'height':settings['height']}
@@ -409,10 +431,10 @@ def _run(request_path,cache=None):
         if settings['flow']=='inpaint' and family!='krea2':
             from diffusers import StableDiffusionInpaintPipeline,StableDiffusionXLInpaintPipeline
             cls=StableDiffusionXLInpaintPipeline if family=='sdxl' else StableDiffusionInpaintPipeline
-            from .memory_policy import convert_pipeline
+            from backend.app.inference.runtime.memory_policy import convert_pipeline
             pipe=convert_pipeline(pipe,cls)
         elif family not in ('anima','krea2'):
-            from .memory_policy import convert_pipeline
+            from backend.app.inference.runtime.memory_policy import convert_pipeline
             pipe=convert_pipeline(pipe,image_pipeline)
         image_args = {'image':source_image, 'strength':settings['strength']}
         if settings['flow']=='inpaint':
@@ -428,16 +450,16 @@ def _run(request_path,cache=None):
         status.update('decode' if step+1>=total else 'generate',step=step+1,total=total)
         return kwargs
 
-    from .prompt_tokens import count_tokens
+    from backend.app.inference.conditioning.prompt_tokens import count_tokens
     if family=='krea2':
-        from .krea2 import count_prompt_tokens
+        from backend.app.inference.models.krea2 import count_prompt_tokens
         token_report=count_prompt_tokens(request['positive'],request['negative'],pipe.tokenizer)
     elif family in ('flux2','zimage'):
-        if family=='zimage':from .z_image import count_prompt_tokens
-        else:from .flux2 import count_prompt_tokens
+        if family=='zimage':from backend.app.inference.models.z_image import count_prompt_tokens
+        else:from backend.app.inference.models.flux2 import count_prompt_tokens
         token_report=count_prompt_tokens(path,request['positive'],request['negative'],pipe.tokenizer)
     elif family=='anima':
-        from .anima import count_prompt_tokens
+        from backend.app.inference.models.anima import count_prompt_tokens
         token_report=count_prompt_tokens(path,request['positive'],request['negative'],[pipe.tokenizer,pipe.t5_tokenizer])
     else:
         token_report = count_tokens(request['positive'], request['negative'], [pipe.tokenizer] + ([pipe.tokenizer_2] if family == 'sdxl' else []),family=family,mode=settings.get('prompt_mode','native'))
@@ -452,25 +474,34 @@ def _run(request_path,cache=None):
     if family=='krea2' and prepared_encoder is not None:krea_conditioning[request['positive']]=prepared_encoder[3]
     def prompt_arguments(positive,negative):
         if family in ('flux2','zimage'):
-            if family=='zimage':from .z_image import prompt_arguments as encode_bundle_prompt
-            else:from .flux2 import prompt_arguments as encode_bundle_prompt
-            return encode_bundle_prompt(pipe,positive,cache.conditioning if cache is not None else {})
+            if family=='zimage':from backend.app.inference.models.z_image import prompt_arguments as encode_bundle_prompt
+            else:from backend.app.inference.models.flux2 import prompt_arguments as encode_bundle_prompt
+            from backend.app.inference.runtime.denoiser_residency import prepare_encoder, retain_denoiser
+            conditioning=cache.conditioning if cache is not None else {}
+            if positive not in conditioning:prepare_encoder(pipe,*resolution,resume_pipeline)
+            arguments=encode_bundle_prompt(pipe,positive,conditioning)
+            retain_denoiser(pipe,*resolution)
+            return arguments
         if family=='krea2':
-            from .krea2 import prompt_arguments as encode_krea_prompt
+            from backend.app.inference.models.krea2 import prompt_arguments as encode_krea_prompt
             return encode_krea_prompt(pipe,positive,krea_conditioning)
         if settings.get('prompt_mode')=='weighted':
-            from .prompt_encoding import encode_weighted
+            from backend.app.inference.conditioning.prompt_encoding import encode_weighted
             return encode_weighted(pipe,positive,negative,family)
         return dict(prompt=positive,negative_prompt=negative)
 
     generator=torch.Generator('cpu').manual_seed(settings['seed'])
     image_conditioning=None
     if family=='krea2' and settings['flow'] in ('img2img','inpaint'):
-        from .krea2 import image_arguments
+        from backend.app.inference.models.krea2 import image_arguments
         image_args,image_conditioning=image_arguments(pipe,source_image,settings['width'],settings['height'],settings['steps'],settings['strength'],generator,
             mask=mask_image if settings['flow']=='inpaint' else None,progress=progress)
         if 'callback_on_step_end' in image_args:call_options['callback_on_step_end']=image_args.pop('callback_on_step_end')
-    arguments=prompt_arguments(request['positive'],request['negative'])
+    from backend.app.inference.runtime.execution import phase
+    with phase(pipe,'condition'):arguments=prompt_arguments(request['positive'],request['negative'])
+    if family=='krea2' and pipe.memory_policy['mode']=='partial' and pipe.weight_maps[0].packed_sources:
+        from backend.app.inference.quantization.lora_weights import configure
+        configure(pipe,model_hash,loras)
     status.update('generate')
     image = pipeline_output(pipe,on_step=lambda step,total:status.update('decode' if step>=total else 'generate',step=step,total=total),**arguments,
                  **image_args, **reference_args, num_inference_steps=settings['steps'],
@@ -483,7 +514,7 @@ def _run(request_path,cache=None):
     if fingerprint(path) != plan['fingerprint']:
         raise ValueError('MODEL_CHANGED during inference')
     if family=='krea2':
-        from .krea2 import verify_config
+        from backend.app.inference.models.krea2 import verify_config
         verify_config(config)
         if hashlib.sha256((config/'manifest.json').read_bytes()).hexdigest()!=plan['config_sha256']:
             raise ValueError('KREA2_CONFIG_CHANGED during inference')
@@ -508,7 +539,7 @@ def _run(request_path,cache=None):
     report_path = request_path.parent / 'report.json'
     report_path.write_text(json.dumps(report, indent=2), encoding='utf-8')
     if any(key in resolved for key in ('face_detector','hand_detector')):
-        from .detailer import detect, refine_regions, select_regions, detail_prompt
+        from backend.app.inference.postprocess.detailer import detect, refine_regions, select_regions, detail_prompt
         try:
             status.update('detect')
             regions=[]
@@ -524,7 +555,7 @@ def _run(request_path,cache=None):
             report_path.write_text(json.dumps(report,indent=2),encoding='utf-8')
             if regions:
                 if family not in ('anima','krea2') and plan.get('inpaint_channels') != 9:
-                    from .memory_policy import convert_pipeline
+                    from backend.app.inference.runtime.memory_policy import convert_pipeline
                     pipe=convert_pipeline(pipe,image_pipeline)
 
             def regenerate(crop,index,region):
@@ -534,7 +565,7 @@ def _run(request_path,cache=None):
                 detail_generator=torch.Generator('cpu').manual_seed(region['seed'])
                 detail_args=dict(image=crop,strength=settings['detail_strength'])
                 if family=='krea2':
-                    from .krea2 import image_arguments
+                    from backend.app.inference.models.krea2 import image_arguments
                     detail_args,region['image_conditioning']=image_arguments(pipe,crop,crop.width,crop.height,
                         settings['detail_steps'],settings['detail_strength'],detail_generator)
                 if plan.get('inpaint_channels') == 9:
@@ -575,6 +606,7 @@ def _run(request_path,cache=None):
     if 'upscaler' in resolved:
         try:
             status.update('upscale')
+            enter_phase(pipe,'postprocess')
             retained=cache is not None and cache.suspend()
             if not retained:
                 if manager:

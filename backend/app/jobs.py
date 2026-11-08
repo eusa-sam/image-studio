@@ -19,7 +19,7 @@ ACTIVE = ('AWAITING_VALIDATION', 'QUEUED', 'RUNNING')
 def execution_plan(store, session, settings):
     plan = preflight(settings)
     if plan['settings'].get('ip_adapter') or plan['settings'].get('flow')=='reference_edit':
-        from .ip_adapter import reference_image
+        from backend.app.inference.conditioning.ip_adapter import reference_image
         _,plan['reference']=reference_image(store,session,plan['settings'])
     if plan.get('runner','').endswith(('_img2img','_inpaint')):
         from PIL import Image
@@ -167,7 +167,7 @@ class JobQueue:
             with self.lock:
                 if self.current is not None or self.idle_since is None or not self.persistent or not self.process or self.process.poll() is not None:return
                 self.idle_checked_at=now
-            from .memory_policy import driver_memory,available_ram
+            from backend.app.inference.runtime.memory_policy import driver_memory, available_ram
             try:
                 low_vram=driver_memory()[0]<2*1024**3
                 low_ram=available_ram()<8*1024**3
@@ -250,7 +250,7 @@ class JobQueue:
                     mask,_=read_mask(self.store,session,plan['mask']['id'],plan['source']['job_id'],plan['source'].get('artifact','image.png'))
                     (work/'mask.png').write_bytes(mask.read_bytes())
                 if 'reference' in plan:
-                    from .ip_adapter import reference_image
+                    from backend.app.inference.conditioning.ip_adapter import reference_image
                     reference,meta=reference_image(self.store,session,plan['settings'])
                     data=reference.read_bytes()
                     if meta!=plan['reference'] or digest(data)!=meta['sha256']:raise ValueError('REFERENCE_CHANGED')
@@ -270,7 +270,7 @@ class JobQueue:
                         service.mkdir(parents=True)
                         self.service=service
                         with (service/'lifecycle.log').open('wb') as log:
-                            self.process=subprocess.Popen([sys.executable,'-m','backend.app.worker_service',str(service)],
+                            self.process=subprocess.Popen([sys.executable,'-m','backend.app.worker_service',str(service),str(self.store.root)],
                                 cwd=ROOT,stdin=subprocess.PIPE,stdout=log,stderr=subprocess.STDOUT,
                                 creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0))
                     self.persistent=True

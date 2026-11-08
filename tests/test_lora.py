@@ -5,7 +5,7 @@ from types import SimpleNamespace
 from unittest.mock import patch, Mock
 import torch
 from safetensors.torch import save_file
-from backend.app.lora import validate_lora, apply_loras, set_lora_weights
+from backend.app.inference.conditioning.lora import validate_lora, apply_loras, set_lora_weights
 from backend.app.models import Settings, preflight, MODEL_ROOT
 
 
@@ -163,7 +163,7 @@ class LoraTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             paths=[Path(directory)/name for name in ('a.safetensors','b.safetensors')]
             for path in paths:save_file({'fixture':torch.ones(1)},path)
-            with patch('backend.app.lora.validate_lora') as validate,patch('safetensors.torch.load_file',return_value={}) as read:
+            with patch('backend.app.inference.conditioning.lora.validate_lora') as validate,patch('safetensors.torch.load_file',return_value={}) as read:
                 apply_loras(pipe,[({'weight':0.0},paths[0]),({'weight':0.7},paths[1])])
         self.assertEqual(read.call_count,2)
         self.assertEqual(validate.call_count,2)

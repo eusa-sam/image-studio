@@ -5,7 +5,7 @@ import time
 from pathlib import Path
 
 STAGES={'verify','load','condition','generate','decode','detect','detail','upscale','save'}
-MODES={'full','partial','model_offload','sequential_offload','auto_model_offload'}
+MODES={'full','partial','model_offload','sequential_offload','auto_model_offload','denoiser_resident','block_offload'}
 
 
 class Progress:

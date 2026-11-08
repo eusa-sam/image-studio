@@ -7,7 +7,7 @@ def validate_lora(pipe, path, *, raw=None, require_dora=False):
     if raw is None:
         raw = load_file(str(path), device='cpu')
         if type(getattr(pipe,'transformer',None)).__name__=='Krea2Transformer2DModel':
-            from .krea2_lora import convert_lora
+            from backend.app.inference.models.krea2_lora import convert_lora
             raw=convert_lora(raw)
     if any('lokr' in key or 'hada' in key for key in raw):
         raise ValueError('LoKr/LoHa는 미지원입니다.')
@@ -100,7 +100,7 @@ def apply_loras(pipe, selections):
                     raise ValueError('Invalid LoRA alpha: '+key)
         raw=load_file(str(path),device='cpu')
         if type(getattr(pipe,'transformer',None)).__name__=='Krea2Transformer2DModel':
-            from .krea2_lora import convert_lora
+            from backend.app.inference.models.krea2_lora import convert_lora
             raw=convert_lora(raw)
         validate_lora(pipe,path,raw=raw,require_dora=require_dora)
         # Diffusers reads rank/alpha/rsLoRA metadata only from a safetensors path.

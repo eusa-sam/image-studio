@@ -2,11 +2,44 @@ import hashlib
 from unittest.mock import patch
 import copy,json,subprocess,sys,tempfile,time,unittest
 from pathlib import Path
-from backend.app.pipeline_cache import PipelineCache
+from backend.app.inference.runtime.pipeline_cache import PipelineCache
 from backend.app.models import ROOT
 
 
 class PipelineCacheTests(unittest.TestCase):
+    def test_krea_strength_change_waits_then_discards_only_derived_weights(self):
+        from types import SimpleNamespace
+        events=[];original=object()
+        mapping=SimpleNamespace(derived_identity='old',derived_cpu_cache={'old':object()},
+            derived_gpu_cache={'old':object()},transfer_following={'old':'next'},cache={'base':original})
+        cache=PipelineCache();cache.key=cache.identity(dict(runner='krea2_txt2img'),(1024,1024))
+        cache.pipe=SimpleNamespace(memory_policy=dict(family='krea2',mode='partial'),weight_maps=[mapping],
+            _weight_transfer=SimpleNamespace(close=lambda:events.append(bool(mapping.derived_gpu_cache))))
+        cache.positive='text';cache.conditioning={'text':{'saved':object()}};cache.lora_weights=(1.,)
+        self.assertIs(cache.get(cache.key,'text',replace_loras=[(dict(weight=.5),'adapter')]),cache.pipe)
+        self.assertEqual(events,[True]);self.assertFalse(mapping.derived_cpu_cache);self.assertFalse(mapping.derived_gpu_cache)
+        self.assertIs(mapping.cache['base'],original);self.assertIn('text',cache.conditioning)
+
+    def test_failed_cleanup_cannot_keep_a_reusable_pipeline(self):
+        cache=PipelineCache();cache.pipe=object();cache.key='old';cache.conditioning={'old':1}
+        with patch('backend.app.inference.runtime.execution.release',side_effect=ValueError('pending transfer')):
+            with self.assertRaisesRegex(ValueError,'pending transfer'):cache.clear()
+        self.assertIsNone(cache.pipe);self.assertIsNone(cache.key);self.assertFalse(cache.conditioning)
+
+    def test_krea_adapter_replacement_preserves_pipeline_and_text_conditions(self):
+        from types import SimpleNamespace
+        cache=PipelineCache();plan=dict(runner='krea2_txt2img',loras=[dict(path='old',weight=1)])
+        cache.key=cache.identity(plan,(1024,1024))
+        cache.pipe=SimpleNamespace(memory_policy=dict(family='krea2',mode='partial'))
+        cache.positive='text';cache.conditioning={'text':{'saved':object()}}
+        key=cache.identity(dict(plan,loras=[dict(path='new',weight=.5)]),(1024,1024))
+        selections=[(dict(weight=.5),'new')];pipe=cache.pipe
+        with patch('backend.app.inference.models.krea2_lora.replace_loras') as replace:
+            self.assertIs(cache.get(key,'text',replace_loras=selections),pipe)
+        replace.assert_called_once_with(pipe,selections)
+        self.assertIn('text',cache.conditioning)
+        self.assertEqual(cache.lora_weights,(.5,))
+
     def test_hash_reuses_only_unchanged_file_and_rejects_racing_change(self):
         from unittest.mock import patch
         import hashlib
@@ -79,11 +112,11 @@ class PipelineCacheTests(unittest.TestCase):
                 pipe=SimpleNamespace(memory_policy=dict(family=family,mode='full'),
                     components={'unet':torch.nn.Linear(2,2)},remove_all_hooks=Mock(),to=Mock())
                 cache=PipelineCache();cache.pipe=pipe;cache.key='same'
-                with patch('backend.app.memory_policy.available_ram',return_value=16*1024**3),patch('torch.cuda.empty_cache'):
+                with patch('backend.app.inference.runtime.memory_policy.available_ram',return_value=16*1024**3),patch('torch.cuda.empty_cache'):
                     self.assertTrue(cache.suspend())
                 self.assertIs(cache.pipe,pipe);self.assertTrue(cache.suspended)
                 pipe.to.assert_called_once_with('cpu');pipe.remove_all_hooks.assert_called_once()
-                with patch('backend.app.memory_policy.available_ram',return_value=0),patch('torch.cuda.empty_cache'):
+                with patch('backend.app.inference.runtime.memory_policy.available_ram',return_value=0),patch('torch.cuda.empty_cache'):
                     self.assertFalse(cache.suspend())
                 self.assertIsNone(cache.pipe);self.assertIsNone(cache.key)
 
@@ -98,26 +131,26 @@ class PipelineCacheTests(unittest.TestCase):
                 changed=copy.deepcopy(plan);changed['loras']=rows
                 self.assertNotEqual(key,PipelineCache.identity(changed,(768,1024)))
         plan['runner']='krea2_txt2img';changed=copy.deepcopy(plan);changed['loras'][0]['weight']=1
-        self.assertNotEqual(PipelineCache.identity(plan,(768,1024)),PipelineCache.identity(changed,(768,1024)))
+        self.assertEqual(PipelineCache.identity(plan,(768,1024)),PipelineCache.identity(changed,(768,1024)))
 
-    def test_service_reuses_cache_and_exits_on_parent_eof(self):
-        runtime=ROOT/'data/runtime';(runtime/'jobs').mkdir(parents=True,exist_ok=True)
+    def test_service_reuses_cache_in_custom_store_and_exits_on_parent_eof(self):
+        runtime=ROOT/'data/runtime/test-custom-store/runtime';(runtime/'jobs').mkdir(parents=True,exist_ok=True)
         with tempfile.TemporaryDirectory(dir=runtime) as service, tempfile.TemporaryDirectory(dir=runtime/'jobs') as first, tempfile.TemporaryDirectory(dir=runtime/'jobs') as second:
             code="""
 import json,sys
 from pathlib import Path
 from backend.app import worker
-from backend.app.pipeline_cache import PipelineCache
+from backend.app.inference.runtime.pipeline_cache import PipelineCache
 PipelineCache.suspend=lambda self:True
 def fake(path,cache):
     cache.pipe=(cache.pipe or 0)+1
     cache.suspended=cache.pipe%2==0
-    Path(path).with_name('result.json').write_text(json.dumps({'calls':cache.pipe}))
+    Path(path).with_name('result.json').write_text(json.dumps({'calls':cache.pipe,'receipts':str(cache.receipt_root)}))
 worker.run=fake
 from backend.app.worker_service import serve
-serve(sys.argv[1])
+serve(sys.argv[1],sys.argv[2])
 """
-            process=subprocess.Popen([sys.executable,'-c',code,service],stdin=subprocess.PIPE,stdout=subprocess.DEVNULL,stderr=subprocess.PIPE)
+            process=subprocess.Popen([sys.executable,'-c',code,service,str(runtime.parent)],stdin=subprocess.PIPE,stdout=subprocess.DEVNULL,stderr=subprocess.PIPE)
             try:
                 for index,folder in enumerate([first,second],1):
                     request=Path(folder)/'request.json';request.write_text('{}')
@@ -127,6 +160,7 @@ serve(sys.argv[1])
                     self.assertTrue(request.with_name('worker-done.json').exists())
                     self.assertEqual(json.loads(request.with_name('worker-done.json').read_text())['cpu_cached'],index%2==0)
                     self.assertEqual(json.loads(request.with_name('result.json').read_text())['calls'],index)
+                    self.assertEqual(Path(json.loads(request.with_name('result.json').read_text())['receipts']),runtime.parent/'indexes/model-verification')
                     token='a'*32
                     acknowledgement=Path(service)/('suspend-'+token+'.json')
                     if acknowledgement.exists():acknowledgement.unlink()
@@ -144,12 +178,12 @@ serve(sys.argv[1])
 class FileChangeStampTests(unittest.TestCase):
     @unittest.skipUnless(__import__('os').name=='nt','Windows file journal')
     def test_recent_large_file_without_journal_cannot_authorize_receipt(self):
-        from backend.app.pipeline_cache import file_stamp
+        from backend.app.inference.runtime.pipeline_cache import file_stamp
         import time
         with tempfile.TemporaryDirectory() as directory:
             path=Path(directory)/'model';path.write_bytes(b'x'*(1024*1024+1))
             now=time.time_ns()
-            with patch('backend.app.pipeline_cache.time.time_ns',return_value=now+3_000_000_000):
+            with patch('backend.app.inference.runtime.pipeline_cache.time.time_ns',return_value=now+3_000_000_000):
                 settled=file_stamp(path)
             self.assertIsNotNone(settled)
             if settled[-1]==0:self.assertIsNone(file_stamp(path))
@@ -184,7 +218,7 @@ class FileChangeStampTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path=Path(directory)/'model';path.write_bytes(b'first');cache=PipelineCache()
             cache.file_hash(path)
-            with patch('backend.app.pipeline_cache.file_stamp',return_value=None),patch('hashlib.file_digest',wraps=hashlib.file_digest) as digest:
+            with patch('backend.app.inference.runtime.pipeline_cache.file_stamp',return_value=None),patch('hashlib.file_digest',wraps=hashlib.file_digest) as digest:
                 cache.file_hash(path);cache.file_hash(path)
                 self.assertEqual(digest.call_count,2)
                 self.assertNotIn(path.resolve(),cache.verified)
@@ -193,7 +227,7 @@ class FileChangeStampTests(unittest.TestCase):
     def test_change_stamp_mutation_during_hash_is_rejected(self):
         with tempfile.TemporaryDirectory() as directory:
             path=Path(directory)/'model';path.write_bytes(b'first');cache=PipelineCache()
-            with patch('backend.app.pipeline_cache.file_stamp',side_effect=[(1,),(2,)]):
+            with patch('backend.app.inference.runtime.pipeline_cache.file_stamp',side_effect=[(1,),(2,)]):
                 with self.assertRaisesRegex(ValueError,'COMPONENT_CHANGED'):cache.file_hash(path)
             self.assertFalse(cache.verified)
 

@@ -6,7 +6,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from backend.app.models import preflight, scan
-from backend.app.krea2 import verify_config, count_prompt_tokens
+from backend.app.inference.models.krea2 import verify_config, count_prompt_tokens
 
 
 class KreaPlanTests(unittest.TestCase):

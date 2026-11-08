@@ -91,6 +91,21 @@ class ApiTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 Settings.model_validate(dict(model='test', **extra))
 
+    def test_portrait_resolution_survives_prompt_save_and_job_snapshot(self):
+        with tempfile.TemporaryDirectory() as directory, patch.object(JobQueue, '_loop'), TestClient(create_app(directory, port=18765), base_url='http://127.0.0.1:18765') as client:
+            session = client.post('/api/sessions', json={}).json()['ref']
+            body = dict(session=session, prompt_id=str(uuid4()), request_id=str(uuid4()), expected_revision=0,
+                        positive='goddess at dawn', settings=dict(model='test', width=832, height=1216), generate=True)
+            with patch('backend.app.main.execution_plan', return_value={'runner':'test'}) as plan:
+                response = client.post('/api/prompts', json=body)
+            self.assertEqual(response.status_code, 200, response.text)
+            self.assertEqual(plan.call_args.args[2]['height'], 1216)
+            document = client.get('/api/prompts/' + body['prompt_id'], params={'session':session}).json()
+            self.assertEqual((document['settings']['width'], document['settings']['height']), (832,1216))
+            for size in ((1216,832),(2048,1536)):
+                settings = Settings(model='test', width=size[0], height=size[1])
+                self.assertEqual((settings.width,settings.height), size)
+
     def test_scan_uses_structure_and_keeps_broken_files_visible(self):
         with tempfile.TemporaryDirectory() as directory, patch('backend.app.models.MODEL_ROOT', Path(directory)):
             folder = Path(directory) / 'checkpoint'

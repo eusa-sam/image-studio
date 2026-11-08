@@ -4,16 +4,28 @@ from unittest.mock import patch,Mock
 from types import SimpleNamespace
 import torch
 from diffusers import FlowMatchEulerDiscreteScheduler, Krea2Pipeline
-from backend.app.krea2 import image_arguments
+from backend.app.inference.models.krea2 import image_arguments
 
 
 class KreaImageTests(unittest.TestCase):
+    def test_cpu_cache_budget_includes_adapter_originals(self):
+        from backend.app.inference.models.krea2 import partial_cache_budgets
+        maps=[SimpleNamespace(extra_cpu_bytes=40,limit_cpu_cache=Mock()),
+              SimpleNamespace(extra_cpu_bytes=8,limit_cpu_cache=Mock()),
+              SimpleNamespace(extra_cpu_bytes=0,limit_cpu_cache=Mock())]
+        pipe=SimpleNamespace(weight_maps=maps,vae=torch.nn.Linear(2,2,bias=False))
+        policy=dict(cpu_cache_budget_bytes=128,resident_budget_bytes=256,activation_reserve_bytes=16)
+        partial_cache_budgets(pipe,policy)
+        maps[0].limit_cpu_cache.assert_called_once_with(64)
+        maps[2].limit_cpu_cache.assert_called_once_with(16)
+        self.assertEqual(maps[0].budget+maps[2].budget,256)
+
     def test_resume_rebudgets_existing_cache_from_current_vram_and_ram(self):
-        from backend.app.krea2 import resume_pipeline
+        from backend.app.inference.models.krea2 import resume_pipeline
         gib=1024**3
         maps=[SimpleNamespace(cpu_bytes=2*gib,limit_cpu_cache=Mock()),SimpleNamespace(cpu_bytes=0,limit_cpu_cache=Mock()),SimpleNamespace(cpu_bytes=0,limit_cpu_cache=Mock())]
         pipe=SimpleNamespace(weight_maps=maps,vae=torch.nn.Linear(2,2,bias=False),memory_policy={'weight_bytes':35*gib,'int8_compute':'native'})
-        with patch('backend.app.memory_policy.available_vram',return_value=(6*gib,16*gib,{'driver_free_bytes':6*gib})),patch('backend.app.memory_policy.available_ram',return_value=gib):
+        with patch('backend.app.inference.runtime.memory_policy.available_vram',return_value=(6*gib,16*gib,{'driver_free_bytes':6*gib})),patch('backend.app.inference.runtime.memory_policy.available_ram',return_value=gib):
             resume_pipeline(pipe,(768,1024))
         self.assertEqual(pipe.memory_policy['mode'],'partial')
         self.assertEqual(pipe.memory_policy['int8_compute'],'native')
@@ -22,7 +34,7 @@ class KreaImageTests(unittest.TestCase):
 
     @unittest.skipUnless(torch.cuda.is_available(),'CUDA required')
     def test_suspended_cpu_conditioning_is_reused_on_execution_device(self):
-        from backend.app.krea2 import prompt_arguments
+        from backend.app.inference.models.krea2 import prompt_arguments
         cache={'woman':{'prompt_embeds':torch.ones(1,4,2,3),'prompt_embeds_mask':torch.tensor([[True,True,False,False]])}}
         pipe=SimpleNamespace(_execution_device='cuda:0',encode_prompt=Mock(side_effect=AssertionError('must reuse conditioning')))
         result=prompt_arguments(pipe,'woman',cache)
@@ -32,19 +44,19 @@ class KreaImageTests(unittest.TestCase):
         torch.testing.assert_close(result['prompt_embeds'].cpu(),cache['woman']['prompt_embeds'])
 
     def test_encoder_temporary_budget_is_scoped_and_failure_does_not_cache(self):
-        from backend.app.krea2 import prompt_arguments
+        from backend.app.inference.models.krea2 import prompt_arguments
         encoder=SimpleNamespace(transient_gpu_budget=0)
         def encode(*args,**kwargs):
             self.assertEqual(encoder.transient_gpu_budget,1024**3)
             raise ValueError('encoder failed')
         pipe=SimpleNamespace(memory_policy={'mode':'partial'},weight_maps=[None,encoder],_execution_device='cuda:0',encode_prompt=encode)
         cache={}
-        with patch('backend.app.memory_policy.available_vram',return_value=(3*1024**3,16*1024**3,{})),patch('torch.cuda.memory_reserved',return_value=0),patch('torch.cuda.memory_allocated',return_value=0):
+        with patch('backend.app.inference.runtime.memory_policy.available_vram',return_value=(3*1024**3,16*1024**3,{})),patch('torch.cuda.memory_reserved',return_value=0),patch('torch.cuda.memory_allocated',return_value=0):
             with self.assertRaisesRegex(ValueError,'encoder failed'):prompt_arguments(pipe,'woman',cache)
         self.assertEqual(encoder.transient_gpu_budget,0);self.assertEqual(cache,{})
 
     def test_prompt_cache_preserves_exact_text_mask_and_is_scoped_to_one_job(self):
-        from backend.app.krea2 import prompt_arguments
+        from backend.app.inference.models.krea2 import prompt_arguments
         calls=[]
         def hidden(prompt, length, device):
             self.assertFalse(torch.is_grad_enabled())

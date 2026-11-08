@@ -1,7 +1,7 @@
 import hashlib,json,os,subprocess,sys,tempfile,unittest
 from pathlib import Path
 from unittest.mock import patch
-from backend.app.pipeline_cache import PipelineCache
+from backend.app.inference.runtime.pipeline_cache import PipelineCache
 from backend.app.verification_receipts import location,read_receipt,hash_reader
 
 
@@ -11,7 +11,7 @@ class VerificationReceiptTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root=Path(directory);model=root/'model';model.write_bytes(b'first');receipts=root/'receipts'
             expected=PipelineCache(receipts).file_hash(model)
-            code="from pathlib import Path;from unittest.mock import patch;from backend.app.pipeline_cache import PipelineCache;import sys;cache=PipelineCache(Path(sys.argv[2]));guard=patch('hashlib.file_digest',side_effect=AssertionError('unexpected source read'));guard.start();print(cache.file_hash(Path(sys.argv[1])));assert cache.hash_checks[-1]['source']=='receipt'"
+            code="from pathlib import Path;from unittest.mock import patch;from backend.app.inference.runtime.pipeline_cache import PipelineCache;import sys;cache=PipelineCache(Path(sys.argv[2]));guard=patch('hashlib.file_digest',side_effect=AssertionError('unexpected source read'));guard.start();print(cache.file_hash(Path(sys.argv[1])));assert cache.hash_checks[-1]['source']=='receipt'"
             result=subprocess.run([sys.executable,'-c',code,str(model),str(receipts)],capture_output=True,text=True)
             self.assertEqual(result.returncode,0,result.stderr)
             self.assertEqual(result.stdout.splitlines()[-1],expected)
@@ -58,7 +58,7 @@ class VerificationReceiptTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root=Path(directory);model=root/'model';model.write_bytes(b'first');receipts=root/'receipts'
             PipelineCache(receipts).file_hash(model)
-            with patch('backend.app.pipeline_cache.file_stamp',return_value=None),patch('hashlib.file_digest',wraps=hashlib.file_digest) as digest:
+            with patch('backend.app.inference.runtime.pipeline_cache.file_stamp',return_value=None),patch('hashlib.file_digest',wraps=hashlib.file_digest) as digest:
                 cache=PipelineCache(receipts);cache.file_hash(model);cache.file_hash(model)
                 self.assertEqual(digest.call_count,2)
                 self.assertTrue(all(row['source']=='read' for row in cache.hash_checks))

@@ -19,7 +19,7 @@ def convert(source,target):
 
 
 def prepare(source,folder,spec=SPEC):
-    from backend.app.z_image import verify_bundle
+    from backend.app.inference.models.z_image import verify_bundle
     source=Path(source).resolve();folder=Path(folder).resolve()
     if source==folder:raise ValueError('BF16 output must not replace source')
     records=[];source_verified=False

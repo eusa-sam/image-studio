@@ -4,7 +4,7 @@ import unittest
 from unittest.mock import patch
 import torch
 from safetensors.torch import save_file
-from backend.app.text_encoder import replace_encoder
+from backend.app.inference.conditioning.text_encoder import replace_encoder
 from backend.app.models import preflight
 
 

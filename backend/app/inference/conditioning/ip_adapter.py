@@ -64,9 +64,9 @@ def attach_adapter(pipe, adapter_path, vision_path, config_path, scale):
 
 
 def reference_image(store,session,settings):
-    from .storage import digest
+    from backend.app.storage import digest
     if settings['reference_attachment']:
-        from .references import read_reference
+        from backend.app.references import read_reference
         path,meta=read_reference(store,session,settings['reference_attachment'])
         if settings.get('flow')=='reference_edit':
             return path.parent/meta['original'],dict(kind='user_reference',id=meta['id'],sha256=meta['sha256'],original_sha256=meta['sha256'],representation='original')

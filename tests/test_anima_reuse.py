@@ -7,18 +7,33 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import torch
-from backend.app.anima import verify_bundle, configure_pipeline
-from backend.app.pipeline_cache import PipelineCache
+from backend.app.inference.models.anima import verify_bundle, configure_pipeline
+from backend.app.inference.runtime.pipeline_cache import PipelineCache
 
 
 class Prepared(Exception): pass
 
 
 class AnimaReuseTests(unittest.TestCase):
+    def test_flow_scheduler_reuse_resets_steps_and_image_start_index(self):
+        from diffusers import FlowMatchEulerDiscreteScheduler
+        from backend.app.inference.runtime.memory_policy import fresh_scheduler
+        scheduler=FlowMatchEulerDiscreteScheduler(shift=3)
+        for steps,start in ((4,0),(6,2),(3,0),(4,0)):
+            def sample(current):
+                current.set_timesteps(steps,device='cpu')
+                self.assertIsNone(current.step_index);self.assertIsNone(current.begin_index)
+                current.set_begin_index(start)
+                value=torch.ones(1,2,4,4)
+                for timestep in current.timesteps[start:]:value=current.step(value*.1,timestep,value,return_dict=False)[0]
+                return value
+            expected=sample(fresh_scheduler(scheduler));actual=sample(scheduler)
+            torch.testing.assert_close(actual,expected,rtol=0,atol=0)
+
     def test_image_and_detail_crop_sizes_are_passed_to_modular_pipeline(self):
         from PIL import Image
         from backend.app.worker import pipeline_output
-        pipe=Mock(memory_policy={'family':'anima'})
+        pipe=Mock(memory_policy={'family':'anima'},weight_maps=(),vae=SimpleNamespace(use_tiling=True,decode=Mock()))
         for size in ((768,1024),(512,384)):
             image=Image.new('RGB',size)
             pipeline_output(pipe,image=image,strength=.5)
@@ -59,12 +74,12 @@ class AnimaReuseTests(unittest.TestCase):
             components={'transformer':torch.nn.Linear(2,2)},to=Mock(),delete_adapters=Mock())
         pipe.delete_adapters.side_effect=lambda names: self.assertTrue(cache.suspended)
         cache.pipe=pipe
-        with patch('backend.app.memory_policy.available_ram',return_value=32*1024**3):
+        with patch('backend.app.inference.runtime.memory_policy.available_ram',return_value=32*1024**3):
             self.assertIs(cache.get(cache.identity(plan|{'loras':[]},(768,1024)),'same',replace_loras=[]),pipe)
         manager.disable_auto_cpu_offload.assert_called_once()
         pipe.delete_adapters.assert_called_once_with(['lora_0','lora_1'])
         choices=[({'weight':1},'first')]
-        with patch('backend.app.lora.apply_loras') as apply:
+        with patch('backend.app.inference.conditioning.lora.apply_loras') as apply:
             self.assertIs(cache.get(cache.identity(plan|{'loras':plan['loras'][:1]},(768,1024)),'same',replace_loras=choices),pipe)
             apply.assert_called_once_with(pipe,choices)
 
@@ -74,7 +89,7 @@ class AnimaReuseTests(unittest.TestCase):
             manager=Mock();module=torch.nn.Linear(2,2)
             pipe=SimpleNamespace(anima_manager=manager,components={'transformer':module},to=Mock(),
                                  **{name:module for name in ('transformer','text_encoder','text_conditioner','vae')})
-            with patch('backend.app.memory_policy.available_vram',return_value=(12*gb,16*gb,{'cuda_free_bytes':13*gb})),patch('backend.app.memory_policy.available_ram',return_value=ram):
+            with patch('backend.app.inference.runtime.memory_policy.available_vram',return_value=(12*gb,16*gb,{'cuda_free_bytes':13*gb})),patch('backend.app.inference.runtime.memory_policy.available_ram',return_value=ram):
                 configure_pipeline(pipe,(768,1024))
                 manager.enable_auto_cpu_offload.assert_called_once_with(device='cuda',memory_reserve_margin=pipe.memory_policy['activation_reserve_bytes']+gb)
                 cache=PipelineCache();cache.pipe=pipe
@@ -85,8 +100,8 @@ class AnimaReuseTests(unittest.TestCase):
             else:
                 manager.disable_auto_cpu_offload.assert_not_called();pipe.to.assert_not_called();self.assertIsNone(cache.pipe)
 
-    def test_reuse_replaces_guidance_and_scheduler_after_cpu_resume(self):
-        from diffusers import FlowMatchEulerDiscreteScheduler
+    def test_reuse_updates_guidance_without_registering_scheduler_after_cpu_resume(self):
+        from diffusers import FlowMatchEulerDiscreteScheduler,ClassifierFreeGuidance
         from backend.app.worker import _run
         for guidance,suspended in ((4.,False),(1.,True)):
             with tempfile.TemporaryDirectory() as folder:
@@ -94,18 +109,21 @@ class AnimaReuseTests(unittest.TestCase):
                 plan=dict(runner='anima_txt2img',settings=dict(width=768,height=1024,guidance=guidance))
                 path.write_text(json.dumps(dict(plan=plan,positive='same')))
                 scheduler=FlowMatchEulerDiscreteScheduler(shift=3)
-                pipe=SimpleNamespace(anima_manager=Mock(),scheduler=scheduler,update_components=Mock(side_effect=Prepared))
+                pipe=SimpleNamespace(anima_manager=Mock(),scheduler=scheduler,guider=ClassifierFreeGuidance(guidance_scale=2),update_components=Mock(),memory_policy={})
                 cache=Mock();cache.get.return_value=pipe;cache.suspended=suspended
                 loras=[({'weight':0},'first'),({'weight':.7},'second')]
-                with patch('backend.app.worker.verify_inputs',return_value=(root/'bundle','verified',{},loras)),patch('torch.cuda.is_available',return_value=True),patch('torch.cuda.reset_peak_memory_stats'),patch('backend.app.memory_policy.available_ram',return_value=32*1024**3),patch('backend.app.anima.configure_pipeline') as configure,patch('backend.app.anima.load_pipeline') as load,patch('backend.app.lora.set_lora_weights') as scales:
-                    with self.assertRaises(Prepared):_run(path,cache)
+                with patch('backend.app.worker.verify_inputs',return_value=(root/'bundle','verified',{},loras)),patch('torch.cuda.is_available',return_value=True),patch('torch.cuda.reset_peak_memory_stats'),patch('backend.app.inference.runtime.memory_policy.available_ram',return_value=32*1024**3),patch('backend.app.inference.models.anima.configure_pipeline') as configure,patch('backend.app.inference.models.anima.load_pipeline') as load,patch('backend.app.inference.conditioning.lora.set_lora_weights') as scales:
+                    def stop_after_prepare(message,**kwargs):
+                        if str(message).startswith('{"memory_policy"'):raise Prepared
+                    with patch('backend.app.worker.print',side_effect=stop_after_prepare):
+                        with self.assertRaises(Prepared):_run(path,cache)
                 load.assert_not_called()
                 scales.assert_called_once_with(pipe,loras)
                 self.assertEqual(cache.get.call_args.kwargs,{'replace_loras':loras})
                 options=pipe.update_components.call_args.kwargs
                 self.assertEqual(options['guider'].config.guidance_scale,guidance)
-                self.assertIsNot(options['scheduler'],scheduler)
-                self.assertEqual(options['scheduler'].config.shift,3)
+                self.assertNotIn('scheduler',options)
+                self.assertIs(pipe.scheduler,scheduler)
                 self.assertFalse(cache.suspended)
-                if suspended:configure.assert_called_once_with(pipe,(768,1024))
-                else:configure.assert_not_called()
+                self.assertEqual(configure.call_count,2 if suspended else 1)
+                configure.assert_called_with(pipe,(768,1024))

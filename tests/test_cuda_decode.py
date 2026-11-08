@@ -1,8 +1,8 @@
 import unittest
 from unittest.mock import patch
 import torch
-from backend.app import cuda_decode
-from backend.app.quantized_weights import undo_convrot
+from backend.app.inference.ops import cuda_decode
+from backend.app.inference.quantization.quantized_weights import undo_convrot
 
 
 class FusedDecodeTests(unittest.TestCase):

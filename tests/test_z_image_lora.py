@@ -33,7 +33,7 @@ class ZImageLoraTests(unittest.TestCase):
 
     def test_worker_passes_verified_lora_files_and_cache_reuses_strength(self):
         from backend.app.worker import _run
-        from backend.app.pipeline_cache import PipelineCache
+        from backend.app.inference.runtime.pipeline_cache import PipelineCache
         class StopAfterLoad(Exception):pass
         loras=[({'weight':.7},Path('verified.safetensors'))]
         plan=dict(runner='zimage_txt2img',settings=dict(width=768,height=1024),loras=[dict(id='style',weight=.7)])
@@ -42,7 +42,7 @@ class ZImageLoraTests(unittest.TestCase):
         self.assertEqual(key,PipelineCache.identity(plan,(768,1024)))
         with tempfile.TemporaryDirectory() as directory:
             path=Path(directory)/'request.json';path.write_text(json.dumps(dict(plan=plan)))
-            with patch('backend.app.worker.verify_inputs',return_value=(Path('bundle'),'hash',{},loras)),patch('torch.cuda.is_available',return_value=True),patch('torch.cuda.reset_peak_memory_stats'),patch('torch.cuda.empty_cache'),patch('backend.app.z_image.load_pipeline',side_effect=StopAfterLoad) as load:
+            with patch('backend.app.worker.verify_inputs',return_value=(Path('bundle'),'hash',{},loras)),patch('torch.cuda.is_available',return_value=True),patch('torch.cuda.reset_peak_memory_stats'),patch('torch.cuda.empty_cache'),patch('backend.app.inference.models.z_image.load_pipeline',side_effect=StopAfterLoad) as load:
                 with self.assertRaises(StopAfterLoad):_run(path)
                 load.assert_called_once_with(Path('bundle'),768,1024,loras=loras)
 
@@ -51,7 +51,7 @@ class ZImageLoraTests(unittest.TestCase):
         import torch
         from diffusers import ZImagePipeline,ZImageTransformer2DModel
         from safetensors.torch import save_file
-        from backend.app.lora import apply_loras,set_lora_weights
+        from backend.app.inference.conditioning.lora import apply_loras, set_lora_weights
         model=ZImageTransformer2DModel(dim=32,n_layers=1,n_refiner_layers=1,n_heads=2,n_kv_heads=2,cap_feat_dim=32,axes_dims=[4,6,6],axes_lens=[32,32,32])
         pipe=ZImagePipeline(transformer=model,vae=None,scheduler=None,text_encoder=None,tokenizer=None)
         layer=model.layers[0].attention.to_q;original=layer.weight.detach().clone()
@@ -65,7 +65,7 @@ class ZImageLoraTests(unittest.TestCase):
             for weight in (1.,.7,0.,1.):
                 selections[0][0]['weight']=weight;set_lora_weights(pipe,selections)
                 torch.testing.assert_close(model.layers[0].attention.to_q(x),baseline+weight*torch.nn.functional.linear(torch.nn.functional.linear(x,a),b),atol=1e-6,rtol=1e-5)
-            from backend.app.pipeline_cache import PipelineCache
+            from backend.app.inference.runtime.pipeline_cache import PipelineCache
             cache=PipelineCache();cache.pipe=pipe
             plan=dict(runner='zimage_txt2img',model_path='same',loras=[dict(path=str(path),weight=1.)])
             cache.key=cache.identity(plan,(768,1024))
@@ -86,7 +86,7 @@ class ZImageLoraTests(unittest.TestCase):
             self.assertTrue(torch.equal(model.layers[0].attention.to_q.get_base_layer().weight,original))
 
     def test_adapter_removal_does_not_reuse_changed_base_or_retain_failed_pipeline(self):
-        from backend.app.pipeline_cache import PipelineCache
+        from backend.app.inference.runtime.pipeline_cache import PipelineCache
         from unittest.mock import Mock
         for changed in ('model_path','fingerprint','components'):
             cache=PipelineCache();pipe=Mock();cache.pipe=pipe
@@ -95,14 +95,14 @@ class ZImageLoraTests(unittest.TestCase):
             value={'vae':'changed'} if changed=='components' else 'changed'
             key=cache.identity(plan|{'loras':[],changed:value},(768,1024))
             self.assertIsNone(cache.get(key,'prompt',replace_loras=[]));pipe.delete_adapters.assert_not_called()
-        cache=PipelineCache();cache.pipe=Mock();cache.pipe.delete_adapters.side_effect=ValueError('partial deletion')
+        cache=PipelineCache();cache.pipe=Mock(_cpu_weights=None);cache.pipe.delete_adapters.side_effect=ValueError('partial deletion')
         cache.key=cache.identity(plan,(768,1024))
         with self.assertRaisesRegex(ValueError,'partial deletion'):
             cache.get(cache.identity(plan|{'loras':[]},(768,1024)),'prompt',replace_loras=[])
         self.assertIsNone(cache.pipe);self.assertIsNone(cache.key)
 
     def test_adapter_addition_replans_residency_and_drops_failed_injection(self):
-        from backend.app.pipeline_cache import PipelineCache
+        from backend.app.inference.runtime.pipeline_cache import PipelineCache
         from unittest.mock import Mock
         plan=dict(runner='zimage_txt2img',model_path='same',loras=[])
         selection=[({'weight':.7},Path('style.safetensors'))]
@@ -115,7 +115,7 @@ class ZImageLoraTests(unittest.TestCase):
                 return retained
             cache.suspend=Mock(side_effect=suspend)
             key=cache.identity(plan|{'loras':[dict(path='style.safetensors')]},(768,1024))
-            with patch('backend.app.lora.apply_loras',side_effect=ValueError('invalid target')) as apply:
+            with patch('backend.app.inference.conditioning.lora.apply_loras',side_effect=ValueError('invalid target')) as apply:
                 if retained:
                     with self.assertRaisesRegex(ValueError,'invalid target'):cache.get(key,'prompt',replace_loras=selection)
                     apply.assert_called_once_with(pipe,selection)

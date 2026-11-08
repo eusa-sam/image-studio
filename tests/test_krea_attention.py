@@ -1,6 +1,6 @@
 import unittest
 import torch
-from backend.app.offload import prefer_cudnn
+from backend.app.inference.runtime.offload import prefer_cudnn
 
 
 @unittest.skipUnless(torch.cuda.is_available() and torch.backends.cudnn.is_available(),'CUDA/cuDNN required')
