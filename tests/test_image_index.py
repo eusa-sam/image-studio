@@ -13,6 +13,22 @@ from backend.app.storage import SessionStore, encode, digest
 
 
 class ImageIndexTests(unittest.TestCase):
+    def test_newest_job_first_and_final_before_original_on_rebuild_cache_and_pages(self):
+        with tempfile.TemporaryDirectory(dir='data') as temporary, SessionStore(temporary) as store:
+            session=store.create_session('Order')
+            expected=[]
+            for day in (1, 2):
+                job=str(uuid4());base=f'sessions/{session}/jobs/{job}'
+                names=['original.png','detailed.png','image.png']
+                store._replace(base+'/state.json',encode(dict(schema_version=1,id=job,status='SUCCEEDED',created_at=f'2026-11-0{day}T12:00:00Z',artifacts=names)))
+                for name in names:store._replace(base+'/artifacts/'+name,b'fixture')
+                expected=[(job,name) for name in ('image.png','original.png','detailed.png')]+expected
+            for rebuild in (True, False):
+                result=images(store,rebuild=rebuild)
+                self.assertEqual([(r['job_id'],r['name']) for r in result['items']],expected)
+            self.assertEqual(images(store,size=1,page=1)['items'][0]['name'],'image.png')
+            self.assertEqual(images(store,size=1,page=2)['items'][0]['name'],'original.png')
+
     def test_replaced_source_with_preserved_size_and_mtime_invalidates_index_after_restart(self):
         with tempfile.TemporaryDirectory() as temporary:
             with SessionStore(temporary) as store:

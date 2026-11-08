@@ -372,13 +372,17 @@ class SessionStore:
                     raise ValueError('Artifact hash mismatch')
             return path
 
-    def chats(self, session, *, tolerate_errors=False, include_application=False):
+    def chats(self, session, *, tolerate_errors=False, include_application=False, conversation_id=None):
         with self._mutex:
             self._ready()
             base = self._session_path(session)
             self._read_json(base + '/session.json')
             turns = self._list_records(base+'/messages',(p/'meta.json' for p in self._path(base+'/messages').glob('*') if p.is_dir()),
                 lambda p:self._chat(session,p.parent.name,include_application=include_application),tolerate_errors)
+            if conversation_id is not None:
+                from .conversations import read, default_id
+                read(self, session, conversation_id)
+                turns = [t for t in turns if t.get('conversation_id', default_id(session)) == conversation_id]
             return sorted(turns, key=lambda row: (row['created_at'], row['id']))
 
     def _chat(self, session, request_id, *, include_application=False):
@@ -390,6 +394,8 @@ class SessionStore:
         if digest(context_bytes) != record['hashes']['context/settings.json']:
             raise ValueError('Chat context hash mismatch')
         source = json.loads(context_bytes)
+        from .conversations import default_id
+        record['conversation_id']=source.get('conversation_id') or default_id(session)
         record['image_context']=source.get('image_context')
         record['user_references']=source.get('user_references',[])
         record['think']=source.get('think')
@@ -451,6 +457,8 @@ class SessionStore:
                 if record['status'] == 'PENDING':
                     raise ConflictError('대화 응답을 기다리는 중입니다.')
                 return record, False
+            from .conversations import begin_changes
+            conversation_changes = begin_changes(self, session, payload)
             context = dict(payload)
             text = {name: context.pop(field).encode('utf-8') for name, field in
                     [('user.txt','message'), ('context/positive.txt','positive'), ('context/negative.txt','negative')]}
@@ -460,6 +468,8 @@ class SessionStore:
                         expected_revision=payload['expected_revision'], model=payload['model'],
                         hashes={name:digest(content) for name,content in text.items()})
             changes = {path + '/' + name:content for name,content in text.items()}
+            if payload.get('conversation_id'):meta['conversation_id']=payload['conversation_id']
+            changes.update(conversation_changes)
             changes[path + '/meta.json'] = encode(meta)
             self._commit(changes)
             return self._chat(session, request_id), True

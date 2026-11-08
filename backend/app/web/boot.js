@@ -12,7 +12,7 @@
   async function load() {
     for (const name of ['navigation.mjs','chat.mjs','mask.mjs','pipeline.mjs','app.js']) {
       try {
-        const module = await import('./' + name + '?v=20261107-ui32');
+        const module = await import('./' + name + '?v=20261109-ui36');
         if (name === 'app.js') await module.ready;
       } catch(error) { throw new Error(name + ': ' + error.message); }
     }

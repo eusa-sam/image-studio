@@ -38,6 +38,7 @@ class ChatOptions(BaseModel):
 class ChatInput(BaseModel):
     model_config = ConfigDict(extra='forbid')
     session: str
+    conversation_id: UUID | None = None
     request_id: UUID
     prompt_id: UUID
     expected_revision: int = Field(ge=0, strict=True)
@@ -164,11 +165,16 @@ class ChatService:
     def __init__(self, store, queue, ollama=None):
         self.store, self.queue = store, queue
         self.ollama = ollama or Ollama()
+        self.compatible = None
         self.active = {}
         for session in store.sessions(tolerate_errors=True):
             for turn in store.chats(session['ref'],tolerate_errors=True):
                 if turn['status'] == 'PENDING':
                     store.finish_chat(session['ref'], turn['id'], error='서버 종료로 중단된 대화입니다. 새 요청으로 다시 보내세요.')
+
+    @property
+    def client(self):
+        return self.compatible or self.ollama
 
     def send(self, body):
         payload = self._payload(body)
@@ -181,14 +187,14 @@ class ChatService:
                 return record
             reasoning = ''
             try:
-                self.queue.suspend_image_model()
-                model, info = self.ollama.local_model(body.model)
+                if getattr(self.client,'uses_local_gpu',True):self.queue.suspend_image_model()
+                model, info = self.client.local_model(body.model)
                 if body.device == 'gpu':
-                    self.ollama.image_ready(selected_model=body.model)
+                    self.client.image_ready(selected_model=body.model)
                 turns = self._history(body)
                 request = self._request(body, payload, info, turns=turns)
                 try:
-                    response = self.ollama.request('chat', request, timeout=180)
+                    response = self.client.request('chat', request, timeout=180)
                     reasoning = response.get('message',{}).get('thinking','')
                     if not isinstance(reasoning,str):
                         reasoning = ''
@@ -198,7 +204,7 @@ class ChatService:
                     proposal = resolve_suggestion(response['message']['content'], body)
                     proposal['memory'] = self._ground_memory(body,proposal['memory'],proposal.pop('memory_action'),proposal.pop('memory_sources'),turns=turns)
                 finally:
-                    self.ollama.release(body.model)
+                    self.client.release(body.model)
                 return self.store.finish_chat(body.session, str(body.request_id), proposal=proposal,
                                               model_digest=model['digest'], reasoning=reasoning)
             except (OllamaError, ValueError, KeyError, TypeError) as exc:
@@ -209,6 +215,9 @@ class ChatService:
     def _payload(self, body):
         from .storage import digest
         payload=body.model_dump(mode='json')
+        if body.conversation_id is None:payload.pop('conversation_id')
+        if self.compatible:
+            payload['llm_connection']=dict(provider='openai_compatible',base_url=self.compatible.base_url)
         from .references import read_reference
         if len(set(body.attachments))!=len(body.attachments):raise ValueError('같은 참고 이미지를 중복 첨부할 수 없습니다.')
         payload['user_references']=[]
@@ -227,8 +236,9 @@ class ChatService:
         return payload
 
     def _history(self, body):
+        from .conversations import default_id
         return [{key:turn[key] for key in ('status','message','reply','memory') if key in turn}
-                for turn in self.store.chats(body.session,tolerate_errors=True) if turn['status']=='SUCCEEDED']
+                for turn in self.store.chats(body.session,tolerate_errors=True,conversation_id=str(body.conversation_id) if body.conversation_id else default_id(body.session)) if turn['status']=='SUCCEEDED']
 
     def _request(self, body, payload, info, *, turns=None):
         from .models import scan
@@ -305,6 +315,14 @@ class ChatService:
             {'role':'user','content':body.message}], stream=False, format=schema,
             keep_alive=0, options={'temperature':0.4,
                                    'repeat_penalty':1.15, 'repeat_last_n':256})
+        if self.compatible:
+            allowed={'temperature','top_p','seed','presence_penalty','frequency_penalty','stop'}
+            supplied=body.options.model_dump(exclude_none=True)
+            if set(supplied)-allowed or body.num_ctx is not None or body.think is not None:
+                raise ValueError('OpenAI 호환 연결에서 지원하지 않는 Ollama 옵션입니다.')
+            if body.num_predict == -1:
+                raise ValueError('OpenAI 호환 출력 토큰은 양수로 입력하거나 모델 기본값으로 비워 두세요.')
+            request['options']={}
         values=info.get('thinking',{}).get('values',[])
         if body.think is not None:
             if not any(type(v) is type(body.think) and v==body.think for v in values):
@@ -411,10 +429,10 @@ class ChatService:
                 yield {'type':'done','turn':record}
                 return
             yield {'type':'status','text':'모델을 준비하고 있어요…'}
-            await finish_thread(self.queue.suspend_image_model)
-            model, info = await asyncio.to_thread(self.ollama.local_model,body.model)
+            if getattr(self.client,'uses_local_gpu',True):await finish_thread(self.queue.suspend_image_model)
+            model, info = await asyncio.to_thread(self.client.local_model,body.model)
             if body.device == 'gpu':
-                await asyncio.to_thread(self.ollama.image_ready,selected_model=body.model)
+                await asyncio.to_thread(self.client.image_ready,selected_model=body.model)
             def prepare():
                 turns = self._history(body)
                 return turns, self._request(body,payload,info,turns=turns)
@@ -423,7 +441,7 @@ class ChatService:
             loaded = True
             content = ''
             complete = False
-            async for chunk in self.ollama.stream_chat(request):
+            async for chunk in self.client.stream_chat(request):
                 if body.device == 'gpu' and chunk.get('_gpu_bytes') == 0:
                     yield {'type':'status','code':'cpu_fallback','text':'GPU를 선택했지만 Ollama가 CPU로 실행 중입니다. 응답이 느릴 수 있어요.'}
                 message = chunk.get('message',{})
@@ -466,7 +484,7 @@ class ChatService:
                 try:
                     if loaded:
                         try:
-                            unloading = asyncio.create_task(asyncio.to_thread(self.ollama.release,body.model))
+                            unloading = asyncio.create_task(asyncio.to_thread(self.client.release,body.model))
                             while not unloading.done():
                                 try:
                                     await asyncio.shield(unloading)

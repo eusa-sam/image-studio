@@ -6,6 +6,10 @@ import os
 from .storage import digest, encode, identifier
 
 
+def image_order(row):
+    return row['created_at'], row['job_id'], {'image.png': 2, 'original.png': 1, 'detailed.png': 0}.get(row['name'], -1)
+
+
 def images(store, *, query='', page=1, size=24, rebuild=False):
     if page < 1 or not 1 <= size <= 100:raise ValueError('Invalid page')
     with store._mutex:
@@ -60,7 +64,7 @@ def images(store, *, query='', page=1, size=24, rebuild=False):
                         rows.append(dict(session=session,title=titles[session],job_id=job,name=name,status=state['status'],
                                          created_at=state['created_at'],model=state.get('plan',{}).get('model_path','')))
                 except (ValueError,OSError,KeyError,TypeError) as exc:errors.append(dict(path=relative,error=str(exc)))
-            rows.sort(key=lambda row:(row['created_at'],row['job_id'],row['name']),reverse=True)
+            rows.sort(key=image_order,reverse=True)
             months=defaultdict(list)
             for row in rows:months[row['session'].split('/')[0]].append(row)
             try:
@@ -79,7 +83,7 @@ def images(store, *, query='', page=1, size=24, rebuild=False):
                 diagnostic=dict(path='indexes/images',error=str(error))
                 store.read_errors['image_index']=[diagnostic]
                 errors=[*errors,diagnostic]
-        rows.sort(key=lambda row:(row['created_at'],row['job_id'],row['name']),reverse=True)
+        rows.sort(key=image_order,reverse=True)
         term=query.strip().casefold()
         if term:rows=[row for row in rows if term in ' '.join(str(value) for value in row.values()).casefold()]
         return dict(items=rows[(page-1)*size:page*size],total=len(rows),page=page,size=size,errors=errors)

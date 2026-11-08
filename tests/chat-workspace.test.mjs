@@ -24,6 +24,30 @@ function fixture() {
 }
 const deferred=()=>{let resolve,reject;const promise=new Promise((a,b)=>{resolve=a;reject=b;});return {promise,resolve,reject};};
 
+test('conversations in one workspace isolate drafts, history, and late streamed replies',async()=>{
+ const f=fixture(),first={session:'A',conversation_id:'first',settings:{}},second={...first,conversation_id:'second'};
+ f.setContext(first);await f.chat.refresh();f.$('chat-input').value='draft one';
+ f.setContext(second);f.chat.switchWorkspace();assert.equal(f.$('chat-input').value,'');await f.chat.refresh();
+ f.$('chat-input').value='draft two';f.setContext(first);f.chat.switchWorkspace();await f.chat.refresh();
+ assert.equal(f.$('chat-input').value,'draft one');
+ const pending=deferred();let emit,request;
+ f.transport((body,callback)=>{request=body;emit=callback;return pending.promise;});
+ const sending=f.$('chat-form').onsubmit({preventDefault(){}});
+ assert.equal(request.conversation_id,'first');
+ f.setContext(second);f.chat.switchWorkspace();await f.chat.refresh();
+ emit({type:'reply',text:'from first'});assert.equal(f.$('chat-input').value,'draft two');
+ pending.reject(Error('first failed'));await sending;
+ assert.equal(f.$('chat-input').value,'draft two');assert.notEqual(f.$('llm-status').textContent,'first failed');
+ f.setContext(first);f.chat.switchWorkspace();await f.chat.refresh();assert.equal(f.$('chat-input').value,'draft one');
+});
+
+test('conversation pages always send their ID and never fall back to all workspace history',async()=>{
+ let path;
+ const api=async url=>{path=url;const error=Error('missing');error.status=404;throw error;};
+ await assert.rejects(()=>chatPage(api,'workspace',null,'conversation'),/missing/);
+ assert.match(path,/conversation_id=conversation/);
+});
+
 test('failed model connection does not leave the model summary loading',async()=>{
  const f=fixture();f.$('llm-model').value='';
  f.api(async()=>({models:[],error:'connection refused'}));await f.chat.connect();

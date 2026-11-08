@@ -8,7 +8,7 @@ const block=source.slice(start,end);
 function render(artifacts){
  const document={createElement:tag=>({tag,children:[],append(...items){this.children.push(...items);}})};
  const article=document.createElement('article');
- vm.runInNewContext(block,{document,article,job:{id:'job',artifacts},selectedSession:'2026-11/workspace',encodeURIComponent});
+ vm.runInNewContext(block,{document,metadata:article,job:{id:'job',artifacts},selectedSession:'2026-11/workspace',encodeURIComponent});
  return article;
 }
 test('detail comparison images open preserved files in a new tab',()=>{

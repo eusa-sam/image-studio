@@ -22,8 +22,8 @@ class ApiTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory, TestClient(create_app(directory),base_url='http://127.0.0.1:8765') as client:
             page=client.get('/')
             self.assertIn('id="startup-status"',page.text)
-            self.assertIn('/boot.js?v=20261107-ui32',page.text)
-            for name in ('boot.js','app.js','navigation.mjs','chat.mjs','mask.mjs','pipeline.mjs','runtime.mjs','reference.mjs'):
+            self.assertRegex(page.text,r'/boot\.js\?v=[A-Za-z0-9-]+')
+            for name in ('boot.js','app.js','navigation.mjs','chat.mjs','mask.mjs','pipeline.mjs','runtime.mjs','reference.mjs','conversations.mjs','layout.mjs'):
                 response=client.get('/'+name+'?v=20261106-ui2')
                 self.assertEqual(response.status_code,200)
                 self.assertIn('javascript',response.headers['content-type'])

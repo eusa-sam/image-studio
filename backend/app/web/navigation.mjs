@@ -72,7 +72,7 @@ export function renderWorkspaces(select, status, records, selected, query='', li
   if(current&&!shown.some(row=>row.ref===current.ref))shown.unshift(current);
   const nodes=shown.map(row=>{
     const node=select.ownerDocument.createElement('option');
-    node.value=row.ref;node.textContent=(row.archived?'[보관] ':'')+row.title;
+    node.value=row.ref;node.textContent=(row.archived?'[숨김] ':'')+row.title;
     return node;
   });
   select.replaceChildren(...nodes);
@@ -87,7 +87,7 @@ export function renderWorkspaces(select, status, records, selected, query='', li
       const title=list.ownerDocument.createElement('strong');title.textContent=row.title;
       const detail=list.ownerDocument.createElement('span');
       const date=new Date(row.updated_at||row.created_at);
-      detail.textContent=(row.archived?'보관됨 · ':'')+(Number.isNaN(date.getTime())?row.ref.split('/')[0]:date.toLocaleDateString('ko-KR',{year:'numeric',month:'short',day:'numeric'}));
+      detail.textContent=(row.archived?'숨김 · ':'')+(Number.isNaN(date.getTime())?row.ref.split('/')[0]:date.toLocaleDateString('ko-KR',{year:'numeric',month:'short',day:'numeric'}));
       button.append(title,detail);button.title=row.title+' · '+row.ref;
       button.onclick=()=>{
         if(select.disabled||select.value===row.ref)return;

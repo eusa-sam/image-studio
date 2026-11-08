@@ -7,7 +7,8 @@ import re
 from pathlib import Path
 from urllib.parse import urlsplit
 from uuid import uuid4
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from typing import Literal
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
 from .storage import encode, digest
 
 
@@ -19,6 +20,36 @@ class AppSettings(BaseModel):
     output_path: str
     ollama_url: str='http://127.0.0.1:11434'
     ollama_endpoint: str='/api'
+    llm_provider: Literal['ollama','openai_compatible']='ollama'
+    openai_base_url: str='http://127.0.0.1:1234/v1'
+    openai_response_format: Literal['json_object','json_schema','text']='json_object'
+    openai_token_field: Literal['max_tokens','max_completion_tokens']='max_tokens'
+    openai_vision_models: list[str]=Field(default_factory=list,max_length=200)
+    openai_key_id: str | None=Field(default=None,pattern=r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$')
+    openai_api_key: SecretStr | None=Field(default=None,exclude=True)
+    openai_key_registered: bool=Field(default=False,exclude=True)
+
+    @field_validator('openai_base_url')
+    @classmethod
+    def compatible_url(cls,value):
+        from .openai_compatible import local_server
+        value=value.strip().rstrip('/')
+        url=urlsplit(value)
+        if (url.scheme not in ('http','https') or not url.hostname or url.username or url.password or
+            url.query or url.fragment or any(c.isspace() for c in value) or
+            not re.fullmatch(r'(?:/[A-Za-z0-9_.~-]+)*',url.path)):
+            raise ValueError('Base URL은 http(s)://호스트/v1 같은 API 기본 주소입니다.')
+        _=url.port
+        if url.scheme!='https' and not local_server(value):
+            raise ValueError('외부 API에는 HTTPS 주소를 사용하세요.')
+        return value
+
+    @field_validator('openai_api_key')
+    @classmethod
+    def valid_key(cls,value):
+        if value is not None and (len(value.get_secret_value())>4096 or any(ord(c)<33 or ord(c)>126 for c in value.get_secret_value())):
+            raise ValueError('API 키 형식을 확인하세요.')
+        return value
 
     @field_validator('model_path','output_path')
     @classmethod
@@ -62,6 +93,30 @@ def read_settings(store):
     return AppSettings(model_path=str(MODEL_ROOT.resolve()),output_path=str(output.resolve()),ollama_url=url)
 
 
+def credentials_file(key_id):
+    from .storage import identifier
+    return 'credentials/'+identifier(key_id)+'.json'
+
+
+def api_key(store,settings):
+    if settings.openai_api_key is not None:return settings.openai_api_key.get_secret_value()
+    if not settings.openai_key_id:return ''
+    path=store._path(credentials_file(settings.openai_key_id))
+    if not path.exists():return ''
+    saved=json.loads(path.read_bytes())
+    return saved['api_key'] if saved['base_url']==settings.openai_base_url else ''
+
+
+def public_settings(store,settings):
+    return settings.model_dump() | {'openai_key_registered':bool(api_key(store,settings))}
+
+
+def compatible_client(store,settings):
+    from .openai_compatible import OpenAICompatible
+    return OpenAICompatible(settings.openai_base_url,api_key(store,settings),
+        vision_models=settings.openai_vision_models,response_format=settings.openai_response_format,token_field=settings.openai_token_field)
+
+
 def validate_directories(settings,store):
     model=Path(settings.model_path);output=Path(settings.output_path)
     if not model.is_dir():raise ValueError('모델 폴더가 없습니다. 모델과 configs가 있는 폴더를 선택하세요.')
@@ -81,9 +136,10 @@ def apply_settings(settings,queue,chat):
     prompt_tokens.MODEL_ROOT=models.MODEL_ROOT
     prompt_tokens.tokenizers.cache_clear()
     queue.output_path=Path(settings.output_path)
-    queue.ollama=chat.ollama
     chat.ollama.base_url=settings.ollama_url
     chat.ollama.endpoint=settings.ollama_endpoint
+    chat.compatible=compatible_client(chat.store,settings) if settings.llm_provider=='openai_compatible' else None
+    queue.ollama=chat.client
 
 
 def export_images(store,session,job_id,output_root,*,recover_existing=False):

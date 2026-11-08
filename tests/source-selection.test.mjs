@@ -18,7 +18,7 @@ test('original result action selects original pixels for SD or Klein and clears 
  for(const family of ['sdxl','flux2']) {
   const nodes=new Map(),$=id=>{if(!nodes.has(id))nodes.set(id,{value:'old'});return nodes.get(id);};
   let button,reference;
-  vm.runInNewContext(source.slice(start,end),{$,job:{id:'job',has_original:true},document:{createElement:()=>({})},article:{append(node){button=node;}},busy:false,workspaceReady:true,originalInputSupported:true,modelInventory:[],imageFamily:()=>family,generationReference:{restore(s){reference=s;}},updateFlow(){},focusSetting(){}});
+  vm.runInNewContext(source.slice(start,end),{$,job:{id:'job',has_original:true},document:{createElement:()=>({})},reuse:{append(node){button=node;}},busy:false,workspaceReady:true,originalInputSupported:true,modelInventory:[],imageFamily:()=>family,generationReference:{restore(s){reference=s;}},updateFlow(){},focusSetting(){}});
   button.onclick();
   if(family==='sdxl'){assert.equal($('source_job').value,'job');assert.equal($('source_artifact').value,'original.png');assert.equal($('mask_id').value,'');}
   else {assert.equal(reference.reference_job,'job');assert.equal(reference.reference_artifact,'original.png');}

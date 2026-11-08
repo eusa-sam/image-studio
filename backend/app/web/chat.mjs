@@ -126,12 +126,12 @@ export function bindReferenceInput(panel, input, picker, button, upload) {
   input.addEventListener('paste',event=>{const files=[...(event.clipboardData?.files||[])];if(files.length){event.preventDefault();upload(files);}});
 }
 
-export async function chatPage(api,session,before=null) {
+export async function chatPage(api,session,before=null,conversationId=null) {
   try {
-    const result=await api('/api/chat/page?session='+encodeURIComponent(session)+'&limit=50'+(before?'&before='+encodeURIComponent(before):''));
+    const result=await api('/api/chat/page?session='+encodeURIComponent(session)+'&limit=50'+(conversationId?'&conversation_id='+encodeURIComponent(conversationId):'')+(before?'&before='+encodeURIComponent(before):''));
     return Array.isArray(result)?{items:result,before:null,has_more:false}:result;
   } catch(error) {
-    if(error.status!==404 || before)throw error;
+    if(error.status!==404 || before || conversationId)throw error;
     return {items:await api('/api/chat?session='+encodeURIComponent(session)),before:null,has_more:false};
   }
 }
@@ -172,13 +172,17 @@ export function promptComparison(doc, before, after, label) {
   element.append(grid);return element;
 }
 
-export function setupChat({api, getContext, apply, isWorkspaceReady=()=>true, doc=document, transport=streamChat}) {
+export function setupChat({api, getContext, apply, isWorkspaceReady=()=>true, onComplete=async()=>{}, doc=document, transport=streamChat}) {
   const $=id=>doc.getElementById(id);
   let active=null, visibleSession=null, historyReady=false, historyEpoch=0, modelEpoch=0, modelLoading=false, uploading=false, modelVision=false;
-  const drafts=new Map(),attachments=new Map();
+  let provider='ollama',baseUrl='';
+  const modelKey=name=>provider==='ollama'?name:baseUrl+'|'+name;
+  const scope=value=>value.session+(value.conversation_id?':'+value.conversation_id:'');
+  const current=()=>scope(getContext());
+  const drafts=new Map(),attachments=new Map(),imageSelections=new Map();
   let historyRows=[], historyCursor=null, olderLoading=false;
   let renderedTurns=new Map();
-  const selectedReferences=()=>attachments.get(getContext().session)||[];
+  const selectedReferences=()=>attachments.get(current())||[];
   const status=text=>{$('llm-status').textContent=text;};
   const nearBottom=()=>$('chat-history').scrollHeight-$('chat-history').scrollTop-$('chat-history').clientHeight<90;
   const bottom=()=>{$('chat-history').scrollTop=$('chat-history').scrollHeight;};
@@ -186,8 +190,8 @@ export function setupChat({api, getContext, apply, isWorkspaceReady=()=>true, do
     $('chat-older').hidden=!historyCursor;
     $('chat-older').disabled=olderLoading || !!active || !historyReady;
     $('chat-older').textContent=olderLoading?'이전 대화를 불러오는 중…':'이전 대화 더 보기';
-    $('chat-send').disabled=!isWorkspaceReady() || !historyReady || visibleSession!==getContext().session || uploading || (selectedReferences().length>0&&!modelVision) || modelLoading || !!active || !$('llm-model').value || !$('chat-input').value.trim();
-    $('chat-stop').hidden=!active || active.body.session!==getContext().session;
+    $('chat-send').disabled=!isWorkspaceReady() || !historyReady || visibleSession!==current() || uploading || (selectedReferences().length>0&&!modelVision) || modelLoading || !!active || !$('llm-model').value || !$('chat-input').value.trim();
+    $('chat-stop').hidden=!active || scope(active.body)!==current();
     $('chat-stop').disabled=!!active?.stopping;
     $('llm-model').disabled=!!active;$('llm-device').disabled=!!active;$('llm-think').disabled=!!active || modelLoading;$('chat-image').disabled=!!active;
     $('chat-upload').disabled=!!active || uploading;
@@ -195,6 +199,12 @@ export function setupChat({api, getContext, apply, isWorkspaceReady=()=>true, do
     $('refresh-llm').disabled=!!active || modelLoading;
     $('llm-output').disabled=!!active;$('llm-context').disabled=!!active;
     for(const key of [...advancedFields,'options'])$('llm-'+key).disabled=!!active;
+    const compatible=provider==='openai_compatible';
+    $('llm-compatible-model').hidden=!compatible;
+    $('llm-output').min=compatible?'1':'-1';
+    $('llm-output').placeholder=compatible?'모델 기본값':'모델 기본값 · -1은 무제한';
+    for(const id of ['llm-device','llm-context','llm-think','llm-top_k','llm-min_p','llm-repeat_penalty'])$(id).disabled=compatible||!!active;
+    $('llm-model-use').disabled=!!active||modelLoading;$('llm-vision').disabled=!!active||modelLoading;
     $('chat-model-name').textContent=$('llm-model').value || (modelLoading?'모델 연결 중':'대화 모델을 연결해 주세요');
   }
   function imagePreview(image) {
@@ -212,11 +222,11 @@ export function setupChat({api, getContext, apply, isWorkspaceReady=()=>true, do
     $('chat-attachments').replaceChildren(...selectedReferences().map((reference,index)=>{
       const card=referenceCard(reference,session,'사용자 참고 '+(index+1));
       const remove=doc.createElement('button');remove.type='button';remove.textContent='이번 대화에서 빼기';remove.disabled=!!active||uploading;
-      remove.onclick=()=>{if(active||uploading)return;attachments.set(session,selectedReferences().filter(r=>r.id!==reference.id));renderAttachments();controls();};card.append(remove);return card;
+      remove.onclick=()=>{if(active||uploading)return;attachments.set(current(),selectedReferences().filter(r=>r.id!==reference.id));renderAttachments();controls();};card.append(remove);return card;
     }));
   }
   async function upload(files) {
-    const session=getContext().session;
+    const session=getContext().session,key=current();
     if(!files.length)return;
     if(!session||active||uploading){$('chat-upload-status').textContent='진행 중인 작업이 끝난 뒤 이미지를 첨부하세요.';return;}
     try{validateAttachments(files,selectedReferences().length);}catch(error){$('chat-upload-status').textContent=error.message;return;}
@@ -228,18 +238,18 @@ export function setupChat({api, getContext, apply, isWorkspaceReady=()=>true, do
         if(file.size>12*1024*1024)throw Error('파일당 최대12MiB입니다.');
         const data=await new Promise((resolve,reject)=>{const reader=new FileReader();reader.onload=()=>resolve(String(reader.result).split(',')[1]);reader.onerror=()=>reject(Error('파일을 읽을 수 없습니다.'));reader.readAsDataURL(file);});
         const reference=await api('/api/references',{session,filename:file.name,data});
-        attachments.set(session,[...(attachments.get(session)||[]),reference]);
+        attachments.set(key,[...(attachments.get(key)||[]),reference]);
         completed++;
       }
-      if(getContext().session===session)$('chat-upload-status').textContent=modelVision?'첨부 완료 · 직접 빼기 전까지 다음 대화에서도 참고합니다.':'첨부 완료 · 위 모델 설정에서 이미지 지원 모델을 선택하세요.';
-    } catch(error){if(getContext().session===session)$('chat-upload-status').textContent=`${files[completed].name} 첨부 실패: ${error.message} · ${completed}개 첨부됨, ${files.length-completed}개 미첨부. 미첨부 파일만 다시 선택하세요.`;}
+      if(current()===key)$('chat-upload-status').textContent=modelVision?'첨부 완료 · 직접 빼기 전까지 다음 대화에서도 참고합니다.':'첨부 완료 · 위 모델 설정에서 이미지 지원 모델을 선택하세요.';
+    } catch(error){if(current()===key)$('chat-upload-status').textContent=`${files[completed].name} 첨부 실패: ${error.message} · ${completed}개 첨부됨, ${files.length-completed}개 미첨부. 미첨부 파일만 다시 선택하세요.`;}
     finally{uploading=false;renderAttachments();controls();}
   }
   bindReferenceInput($('chat-history').parentElement,$('chat-input'),$('chat-upload'),$('chat-attach'),upload);
   function resize() {const input=$('chat-input');input.style.height='auto';input.style.height=Math.min(input.scrollHeight,160)+'px';}
   function bubble(role,text) {
     const element=doc.createElement('div');element.className='chat-bubble chat-'+role;
-    const who=doc.createElement('span');who.className='chat-author';who.textContent=role==='user' ? '나' : '이미지 도우미';
+    const who=doc.createElement('span');who.className='chat-author';who.textContent=role==='user' ? '나' : 'Assistant';
     const content=doc.createElement('div');content.className='chat-text';
     if(role==='assistant')renderReply(doc,content,text);else content.textContent=text;
     element.append(who,content);return {element,content};
@@ -253,7 +263,7 @@ export function setupChat({api, getContext, apply, isWorkspaceReady=()=>true, do
     if(turn.image_context){const figure=doc.createElement('figure'),image=doc.createElement('img'),caption=doc.createElement('figcaption');figure.className='generated-reference';image.src='/api/jobs/'+turn.image_context.job_id+'/image.png?session='+encodeURIComponent(turn.context?.session||getContext().session);image.alt='이전 생성 결과';image.loading='lazy';caption.textContent='앱 생성 결과 · '+turn.image_context.job_id.slice(0,8);figure.append(imagePreview(image),caption);user.element.append(figure);}
     for(const [index,reference] of (turn.user_references||[]).entries()) {
       const card=referenceCard(reference,turn.context?.session||getContext().session,'사용자 참고 '+(index+1));
-      const reuse=doc.createElement('button');reuse.type='button';reuse.textContent='다시 참고하기';reuse.onclick=()=>{const session=getContext().session;if(active||uploading||session!==turn.context?.session)return;const selected=selectedReferences();if(selected.some(r=>r.id===reference.id))return;if(selected.length>=4){status('참고 이미지는 최대4개입니다.');return;}attachments.set(session,[...selected,reference]);renderAttachments();controls();};card.append(reuse);user.element.append(card);
+      const reuse=doc.createElement('button');reuse.type='button';reuse.textContent='다시 참고하기';reuse.onclick=()=>{const session=getContext().session;if(active||uploading||session!==turn.context?.session)return;const selected=selectedReferences();if(selected.some(r=>r.id===reference.id))return;if(selected.length>=4){status('참고 이미지는 최대4개입니다.');return;}attachments.set(current(),[...selected,reference]);renderAttachments();controls();};card.append(reuse);user.element.append(card);
     }
     if(turn.created_at) {const time=doc.createElement('time');time.className='chat-time';time.dateTime=turn.created_at;time.textContent=new Date(turn.created_at).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'});user.element.append(time);}
     if(turn.status==='PENDING') {assistant.element.classList.add('is-writing');assistant.content.setAttribute('aria-label','응답 작성 중');}
@@ -280,10 +290,10 @@ export function setupChat({api, getContext, apply, isWorkspaceReady=()=>true, do
     if(['FAILED','CANCELLED'].includes(turn.status)) {
       assistant.element.children[0].textContent+=' · '+(turn.status==='FAILED'?'응답 실패':'응답 중단');
       if(turn.reply){const note=doc.createElement('p');note.className='chat-error';note.textContent=turn.error || '응답 중단';assistant.element.append(note);}
-      const session=turn.context?.session||getContext().session;
+      const session=turn.context?scope({...turn.context,conversation_id:turn.conversation_id||turn.context.conversation_id}):current();
       const retry=doc.createElement('button');retry.type='button';retry.textContent='이 메시지 다시 작성';
       retry.onclick=()=>{
-        if(active||uploading||!historyReady||!isWorkspaceReady()||session!==getContext().session||session!==visibleSession)return;
+        if(active||uploading||!historyReady||!isWorkspaceReady()||session!==current()||session!==visibleSession)return;
         const input=$('chat-input');
         if(input.value && input.value!==turn.message){status('작성 중인 메시지를 먼저 보내거나 비운 뒤 다시 작성하세요.');return;}
         input.value=turn.message;drafts.set(session,turn.message);resize();controls();input.focus();
@@ -306,13 +316,13 @@ export function setupChat({api, getContext, apply, isWorkspaceReady=()=>true, do
     renderedTurns=new Map(turns.map(turn=>[turn.id,renderedTurns.get(turn.id)]));
   }
   function switchWorkspace() {
-    const session=getContext().session, changed=visibleSession!==session;
+    const session=current(), changed=visibleSession!==session;
     if(changed) {
-      if(visibleSession)drafts.set(visibleSession,$('chat-input').value);
+      if(visibleSession){drafts.set(visibleSession,$('chat-input').value);imageSelections.set(visibleSession,$('chat-image').value);}
       visibleSession=session;historyReady=false;historyEpoch++;historyRows=[];historyCursor=null;olderLoading=false;renderedTurns.clear();
-      $('chat-input').value=drafts.get(session)||'';resize();renderAttachments();
+      $('chat-input').value=drafts.get(session)||'';$('chat-image').value=imageSelections.get(session)||'latest';resize();renderAttachments();
       $('chat-history').replaceChildren();$('chat-upload-status').textContent='';
-      status(active ? (active.body.session===session?'응답을 이어 받고 있어요…':'다른 Workspace에서 응답 중입니다. 완료 후 대화할 수 있어요.'):'대화 기록을 불러오는 중…');
+      status(active ? (scope(active.body)===session?'응답을 이어 받고 있어요…':'다른 Workspace에서 응답 중입니다. 완료 후 대화할 수 있어요.'):'대화 기록을 불러오는 중…');
     }
     controls();return changed;
   }
@@ -322,16 +332,16 @@ export function setupChat({api, getContext, apply, isWorkspaceReady=()=>true, do
     const epoch=++historyEpoch, stick=changed || nearBottom();
     olderLoading=false;historyReady=false;controls();
     let page;
-    try {page=await chatPage(api,context.session);}
+    try {page=await chatPage(api,context.session,null,context.conversation_id);}
     catch(error){
-      if(epoch!==historyEpoch || getContext().session!==context.session)return;
+      if(epoch!==historyEpoch || current()!==scope(context))return;
       throw error;
     }
-    if(epoch!==historyEpoch || getContext().session!==context.session)return;
+    if(epoch!==historyEpoch || current()!==scope(context))return;
     olderLoading=false;
     if(!historyRows.length)historyCursor=page.has_more?page.before:null;
     const history=[...new Map([...historyRows,...page.items].map(turn=>[turn.id,turn])).values()];
-    if(active?.body.session===context.session) {
+    if(active && scope(active.body)===scope(context)) {
       const index=history.findIndex(t=>t.id===active.body.request_id);
       const current={id:active.body.request_id,message:active.body.message,reply:active.reply,reasoning:active.reasoning,status:'PENDING',user_references:active.references,context:active.body};
       if(index<0)history.push(current);else if(history[index].status==='PENDING')history[index]=current;
@@ -352,19 +362,19 @@ export function setupChat({api, getContext, apply, isWorkspaceReady=()=>true, do
   }
   $('chat-older').onclick=async()=>{
     if(olderLoading || active || !historyReady || !historyCursor)return;
-    const session=getContext().session,epoch=historyEpoch,cursor=historyCursor;
+    const context=getContext(),session=context.session,epoch=historyEpoch,cursor=historyCursor;
     olderLoading=true;controls();
     try {
-      const page=await chatPage(api,session,cursor);
-      if(epoch!==historyEpoch || session!==getContext().session)return;
+      const page=await chatPage(api,session,cursor,context.conversation_id);
+      if(epoch!==historyEpoch || scope(context)!==current())return;
       const panel=$('chat-history'),height=panel.scrollHeight,top=panel.scrollTop;
       historyRows=[...new Map([...page.items,...historyRows].map(turn=>[turn.id,turn])).values()];
       historyCursor=page.has_more?page.before:null;
       renderHistory(historyRows);
       panel.scrollTop=top+panel.scrollHeight-height;
       status(page.items.length?'이전 대화를 불러왔어요.': '읽을 수 있는 이전 대화가 없습니다. 저장 기록 안내를 확인하세요.');
-    } catch(error){if(epoch===historyEpoch && session===getContext().session)status(error.message);}
-    finally{if(epoch===historyEpoch && session===getContext().session){olderLoading=false;controls();}}
+    } catch(error){if(epoch===historyEpoch && scope(context)===current())status(error.message);}
+    finally{if(epoch===historyEpoch && scope(context)===current()){olderLoading=false;controls();}}
   };
   async function applyTurn(turn,generate) {
     if(!sameDraft(turn.context,getContext()))throw new Error('프롬프트가 그 뒤에 변경됐어요. 현재 내용을 기준으로 다시 다듬어 달라고 요청해 주세요.');
@@ -376,16 +386,16 @@ export function setupChat({api, getContext, apply, isWorkspaceReady=()=>true, do
     if(!name){modelLoading=false;modelVision=false;$('llm-think').replaceChildren();$('llm-capabilities').textContent='';controls();return;}
     modelLoading=true;modelVision=false;controls();
     for(const [id,key] of [['llm-output','num_predict'],['llm-context','num_ctx']]) {
-      let value='';try{value=localStorage.getItem('image-maker.'+key+'.'+name)||'';}catch{}
+      let value='';try{value=localStorage.getItem('image-maker.'+key+'.'+modelKey(name))||'';}catch{}
       $(id).value=value;
     }
-    let advanced={};try{advanced=JSON.parse(localStorage.getItem('image-maker.options.'+name)||'{}');}catch{}
+    let advanced={};try{advanced=JSON.parse(localStorage.getItem('image-maker.options.'+modelKey(name))||'{}');}catch{}
     if(!advanced || typeof advanced!=='object' || Array.isArray(advanced))advanced={};
     for(const key of [...advancedFields,'options'])$('llm-'+key).value=advanced[key]??'';
     try {
       const info=await api('/api/llm/model-info?name='+encodeURIComponent(name));
       if(epoch!==modelEpoch)return;
-      modelVision=info.capabilities.includes('vision');
+      modelVision=info.capabilities.includes('vision');$('llm-vision').checked=modelVision;
       const values=info.thinking?.values || [];
       const thinkingLabel=value=>value===false?'끄기':value===true?'켜기':value;
       $('llm-think').replaceChildren(...[null,...values].map(value=>{
@@ -393,7 +403,7 @@ export function setupChat({api, getContext, apply, isWorkspaceReady=()=>true, do
         option.textContent=value===null ? '모델 기본값'+(info.thinking?.default!=null ? ' ('+thinkingLabel(info.thinking.default)+')':'') : thinkingLabel(value);
         return option;
       }));
-      let selected='null';try {selected=localStorage.getItem('image-maker.think.'+name)||'null';}catch{}
+      let selected='null';try {selected=localStorage.getItem('image-maker.think.'+modelKey(name))||'null';}catch{}
       $('llm-think').value=[...$('llm-think').options].some(o=>o.value===selected)?selected:'null';
       $('llm-capabilities').textContent=(info.capabilities.includes('vision')?'이미지 내용을 함께 볼 수 있는 모델':'이미지 미지원 · 생성 프롬프트만 전달')+' · reasoning '+(values.length?values.map(thinkingLabel).join(' / '):'서버가 선택지를 제공하지 않아 모델 기본값을 사용합니다.');
     }catch(error){if(epoch===modelEpoch){status(error.message);$('llm-think').replaceChildren();}}
@@ -406,37 +416,43 @@ export function setupChat({api, getContext, apply, isWorkspaceReady=()=>true, do
     try {
       const result=await api('/api/llm/models');
       if(epoch!==modelEpoch)return;
-      let selected=$('llm-model').value;
-      try {selected ||= localStorage.getItem('image-maker.llm') || '';} catch {}
+      provider=result.provider||'ollama';baseUrl=result.base_url||'';
+      $('llm-destination').textContent=(provider==='ollama'?'Ollama':'OpenAI 호환')+' · '+baseUrl;
+      let selected='';
+      try {selected ||= localStorage.getItem(provider==='ollama'?'image-maker.llm':'image-maker.llm.'+baseUrl) || '';} catch {}
       $('llm-model').replaceChildren(...result.models.map(m=>{const option=doc.createElement('option');option.value=m.name;option.textContent=m.name;return option;}));
-      $('llm-model').value=preferredModel(result.models,selected);
-      $('llm-connection').textContent=result.error ? '연결 실패' : '로컬 연결';
+      if(provider==='openai_compatible'&&selected&&!result.models.some(m=>m.name===selected)){const option=doc.createElement('option');option.value=selected;option.textContent=selected;$('llm-model').append(option);}
+      $('llm-model').value=provider==='openai_compatible'&&selected?selected:preferredModel(result.models,selected);
+      $('llm-connection').textContent=result.error ? '목록 조회 실패' : provider==='ollama'?'로컬 연결':'OpenAI 호환';
       $('chat-settings').open=!!result.error || !result.models.length;
-      status(result.error || (result.models.length ? '편하게 이야기해 주세요.' : 'Ollama에 설치된 대화 모델이 없습니다.'));
+      status(result.error || (result.models.length ? '편하게 이야기해 주세요.' : provider==='ollama'?'Ollama에 설치된 대화 모델이 없습니다.':'모델 ID를 직접 입력하세요.'));
     } catch(e) {if(epoch!==modelEpoch)return;status(e.message);$('chat-settings').open=true;}
     await modelInfo();controls();
   }
+  $('chat-action').onchange=()=>{const action=$('chat-action').value;$('chat-action-hint').textContent=action==='generate'?'제안을 작업실에 반영하고 이미지를 생성합니다.':action==='apply'?'제안을 작업실에 바로 반영합니다.':'제안을 확인하고 원하는 수정만 반영합니다.';$('chat-form').dataset && ($('chat-form').dataset.action=action);};
   $('refresh-llm').onclick=connect;
+  $('llm-model-use').onclick=async()=>{const name=$('llm-model-id').value.trim();if(!name||active||modelLoading)return;if(![...$('llm-model').options].some(o=>o.value===name)){const option=doc.createElement('option');option.value=name;option.textContent=name;$('llm-model').append(option);}$('llm-model').value=name;await $('llm-model').onchange();};
+  $('llm-vision').onchange=async()=>{const name=$('llm-model').value;if(!name)return;const checked=$('llm-vision').checked;try{const settings=await api('/api/settings');if(settings.llm_provider!==provider||settings.openai_base_url!==baseUrl)throw Error('연결 설정이 변경됐습니다. 다시 연결하세요.');settings.openai_vision_models=settings.openai_vision_models.filter(m=>m!==name);if(checked)settings.openai_vision_models.push(name);await api('/api/settings',settings);await modelInfo();}catch(error){$('llm-vision').checked=modelVision;status(error.message);}};
   for(const key of [...advancedFields,'options'])$('llm-'+key).onchange=()=>{
-    try{localStorage.setItem('image-maker.options.'+$('llm-model').value,JSON.stringify(Object.fromEntries([...advancedFields,'options'].map(name=>[name,$('llm-'+name).value]))));}catch{}
+    try{localStorage.setItem('image-maker.options.'+modelKey($('llm-model').value),JSON.stringify(Object.fromEntries([...advancedFields,'options'].map(name=>[name,$('llm-'+name).value]))));}catch{}
   };
-  $('llm-model').onchange=()=>{try{localStorage.setItem('image-maker.llm',$('llm-model').value);}catch{}return modelInfo();};
-  $('llm-think').onchange=()=>{try{localStorage.setItem('image-maker.think.'+$('llm-model').value,$('llm-think').value);}catch{}};
-  for(const [id,key] of [['llm-output','num_predict'],['llm-context','num_ctx']])$(id).onchange=()=>{try{localStorage.setItem('image-maker.'+key+'.'+$('llm-model').value,$(id).value);}catch{}};
+  $('llm-model').onchange=()=>{try{localStorage.setItem(provider==='ollama'?'image-maker.llm':'image-maker.llm.'+baseUrl,$('llm-model').value);}catch{}return modelInfo();};
+  $('llm-think').onchange=()=>{try{localStorage.setItem('image-maker.think.'+modelKey($('llm-model').value),$('llm-think').value);}catch{}};
+  for(const [id,key] of [['llm-output','num_predict'],['llm-context','num_ctx']])$(id).onchange=()=>{try{localStorage.setItem('image-maker.'+key+'.'+modelKey($('llm-model').value),$(id).value);}catch{}};
   $('chat-input').oninput=()=>{drafts.set(visibleSession,$('chat-input').value);resize();controls();};
   $('chat-input').onkeydown=event=>{if(event.key==='Enter' && !event.shiftKey && !event.isComposing && event.keyCode!==229){event.preventDefault();if(!$('chat-send').disabled)$('chat-form').requestSubmit();}};
   $('chat-stop').onclick=async()=>{
     const run=active;if(!run)return;run.stopping=true;controls();status('응답을 중단하고 모델 메모리를 정리하고 있어요…');
-    try {const result=await api(`/api/chat/${run.body.request_id}/cancel?session=${encodeURIComponent(run.body.session)}`,{});if(!result.cancelled){run.stopping=false;controls();}}catch(e){run.stopping=false;controls();if(active===run && getContext().session===run.body.session)status(e.message);}
+    try {const result=await api(`/api/chat/${run.body.request_id}/cancel?session=${encodeURIComponent(run.body.session)}`,{});if(!result.cancelled){run.stopping=false;controls();}}catch(e){run.stopping=false;controls();if(active===run && current()===scope(run.body))status(e.message);}
   };
   $('chat-form').onsubmit=async event=>{
-    event.preventDefault();if(!isWorkspaceReady() || !historyReady || visibleSession!==getContext().session || uploading || (selectedReferences().length>0&&!modelVision) || modelLoading || active || !$('llm-model').value || !$('chat-input').value.trim())return;
+    event.preventDefault();if(!isWorkspaceReady() || !historyReady || visibleSession!==current() || uploading || (selectedReferences().length>0&&!modelVision) || modelLoading || active || !$('llm-model').value || !$('chat-input').value.trim())return;
     const action=$('chat-action').value;
     const image=$('chat-image').value;
-    let limits;try{limits={...tokenOptions($('llm-output').value,$('llm-context').value),options:chatOptions(Object.fromEntries(advancedFields.map(key=>[key,$('llm-'+key).value])),$('llm-options').value)};}catch(error){status(error.message);$('chat-settings').open=true;return;}
-    const body={...getContext(),...limits,attachments:selectedReferences().map(r=>r.id),think:JSON.parse($('llm-think').value||'null'),image_mode:['latest','none'].includes(image)?image:'selected',image_job:['latest','none'].includes(image)?null:image,model:$('llm-model').value,device:$('llm-device').value,message:$('chat-input').value.trim(),request_id:crypto.randomUUID()};
+    let limits;try{limits={...tokenOptions($('llm-output').value,provider==='ollama'?$('llm-context').value:''),options:chatOptions(Object.fromEntries(advancedFields.filter(key=>provider==='ollama'||['temperature','top_p','seed'].includes(key)).map(key=>[key,$('llm-'+key).value])),$('llm-options').value)};}catch(error){status(error.message);$('chat-settings').open=true;return;}
+    const body={...getContext(),...limits,attachments:selectedReferences().map(r=>r.id),think:provider==='ollama'?JSON.parse($('llm-think').value||'null'):null,image_mode:['latest','none'].includes(image)?image:'selected',image_job:['latest','none'].includes(image)?null:image,model:$('llm-model').value,device:$('llm-device').value,message:$('chat-input').value.trim(),request_id:crypto.randomUUID()};
     const run={body,reply:'',reasoning:'',stopping:false,references:[...selectedReferences()]};active=run;renderAttachments();
-    $('chat-input').value='';drafts.set(body.session,'');resize();controls();
+    $('chat-input').value='';drafts.set(scope(body),'');resize();controls();
     if($('chat-history').querySelector('.chat-welcome'))$('chat-history').replaceChildren();
     $('chat-history').append(renderTurn({id:body.request_id,message:body.message,status:'PENDING',created_at:new Date().toISOString(),user_references:selectedReferences(),context:getContext()}));bottom();status('응답 준비 중…');
     try {
@@ -444,22 +460,22 @@ export function setupChat({api, getContext, apply, isWorkspaceReady=()=>true, do
         if(event.type==='reply')run.reply=event.text;
         if(event.type==='reasoning')run.reasoning+=event.text;
         if(event.type==='status' && event.code==='cpu_fallback')run.executionNote=event.text;
-        if(getContext().session!==body.session)return;
+        if(current()!==scope(body))return;
         if(event.type==='reasoning'){const stick=nearBottom();run.reasoningPanel?.update(run.reasoning,true);status(run.executionNote || '생각하는 중…');if(stick)bottom();}
         if(event.type==='status')status(event.text);
         if(event.type==='reply' && run.replyNode?.isConnected){const stick=nearBottom();run.reasoningPanel?.update(run.reasoning,false);renderReply(doc,run.replyNode,event.text);status(run.executionNote || '답변하고 있어요…');if(stick)bottom();}
       });
       if(turn.status==='FAILED')throw new Error(turn.error || '응답을 완료하지 못했습니다. 설정을 확인하고 다시 보내세요.');
       if(turn.status==='SUCCEEDED' && turn.update && action!=='suggest')await applyTurn(turn,action==='generate');
-      else if(getContext().session===body.session)status(turn.status==='SUCCEEDED' ? (turn.update ? '아래 제안을 확인하고 반영할 수 있어요.' : '이어서 이야기해 주세요.') : turn.error || '응답 중단');
+      else if(current()===scope(body))status(turn.status==='SUCCEEDED' ? (turn.update ? '아래 제안을 확인하고 반영할 수 있어요.' : '이어서 이야기해 주세요.') : turn.error || '응답 중단');
     } catch(e) {
-      if(!drafts.get(body.session)) {
-        drafts.set(body.session,body.message);
-        if(visibleSession===body.session){$('chat-input').value=body.message;resize();}
+      if(!drafts.get(scope(body))) {
+        drafts.set(scope(body),body.message);
+        if(visibleSession===scope(body)){$('chat-input').value=body.message;resize();}
       }
-      if(getContext().session===body.session)status(e.message);
+      if(current()===scope(body))status(e.message);
     }
-    finally {active=null;controls();renderAttachments();await refresh().catch(e=>status(e.message));if(getContext().session===body.session)$('chat-input').focus();}
+    finally {active=null;controls();renderAttachments();await onComplete().catch(e=>status(e.message));await refresh().catch(e=>status(e.message));if(current()===scope(body))$('chat-input').focus();}
   };
   return {refresh,connect,switchWorkspace};
 }

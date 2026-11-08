@@ -17,7 +17,7 @@ from .storage import ConflictError, SessionStore
 from .chat import ChatInput, ChatService
 from .ollama import OllamaError
 from backend.app.inference.conditioning.prompt_tokens import count_tokens
-from .app_settings import AppSettings,read_settings,validate_directories,apply_settings,settings_file
+from .app_settings import AppSettings,read_settings,validate_directories,apply_settings,settings_file,public_settings,compatible_client,credentials_file,api_key
 
 
 class TokenInput(BaseModel):
@@ -36,6 +36,17 @@ class SessionInput(BaseModel):
 class SessionUpdate(BaseModel):
     session: str
     expected_revision: int = Field(ge=1,strict=True)
+    title: str = Field(min_length=1,max_length=200)
+    archived: bool = Field(strict=True)
+
+
+class ConversationInput(BaseModel):
+    session: str
+
+
+class ConversationUpdate(ConversationInput):
+    conversation_id: UUID
+    expected_revision: int = Field(ge=0,strict=True)
     title: str = Field(min_length=1,max_length=200)
     archived: bool = Field(strict=True)
 
@@ -107,9 +118,19 @@ def create_app(data_root=None, *, port=8765):
         response.headers['Content-Security-Policy'] = "default-src 'self'; img-src 'self'; frame-ancestors 'none'"
         return response
 
+    from fastapi.exceptions import RequestValidationError
+
+    @app.exception_handler(RequestValidationError)
+    async def invalid_request(request, exc):
+        return JSONResponse({'detail':[{'loc':e['loc'],'msg':e['msg'],'type':e['type']} for e in exc.errors()]},status_code=422)
+
     @app.exception_handler(ConflictError)
     async def conflict(request, exc):
         return JSONResponse({'detail': str(exc)}, status_code=409)
+
+    @app.exception_handler(OllamaError)
+    async def llm_error(request, exc):
+        return JSONResponse({'detail': str(exc)}, status_code=502)
 
     @app.exception_handler(ValueError)
     async def invalid(request, exc):
@@ -125,11 +146,15 @@ def create_app(data_root=None, *, port=8765):
 
     @app.get('/api/settings')
     def preferences():
-        return app.state.preferences.model_dump()
+        return public_settings(app.state.store,app.state.preferences)
 
     @app.post('/api/settings/connection-test')
     def connection_test(body: AppSettings):
         from .ollama import Ollama
+        if body.llm_provider=='openai_compatible':
+            body=body.model_copy(update={'openai_key_id':app.state.preferences.openai_key_id})
+            client=compatible_client(app.state.store,body)
+            return dict(provider=body.llm_provider,models=client.models())
         client=Ollama(body.ollama_url,body.ollama_endpoint)
         return dict(version=client.request('version').get('version'),models=client.models())
 
@@ -146,15 +171,34 @@ def create_app(data_root=None, *, port=8765):
                 queue.release_image_model()
                 body=body.model_copy(update={'revision':body.revision+1})
                 from .storage import encode
+                new_key=None
                 try:
                     with app.state.store._mutex:
                         app.state.store._ready()
+                        from uuid import uuid4
+                        previous_key=app.state.preferences.openai_key_id
+                        body=body.model_copy(update={'openai_key_id':previous_key})
+                        if body.openai_api_key is not None or body.openai_base_url!=app.state.preferences.openai_base_url:
+                            key=body.openai_api_key.get_secret_value() if body.openai_api_key is not None else ''
+                            key_id=str(uuid4()) if key else None
+                            if key_id:
+                                new_key=key_id
+                                app.state.store._replace(credentials_file(key_id),encode(dict(base_url=body.openai_base_url,api_key=key)))
+                            body=body.model_copy(update={'openai_key_id':key_id})
                         app.state.store._replace(settings_file(),encode(body.model_dump()))
                 except OSError as error:
+                    if new_key:
+                        try:app.state.store._path(credentials_file(new_key)).unlink(missing_ok=True)
+                        except OSError:pass
                     raise ValueError('설정 파일을 저장하지 못했습니다. 기존 설정은 유지됩니다: '+str(error)) from error
+                body=body.model_copy(update={'openai_api_key':None})
                 apply_settings(body,queue,app.state.chat)
                 app.state.preferences=body
-                return body.model_dump()
+                if previous_key and previous_key!=body.openai_key_id:
+                    try:app.state.store._path(credentials_file(previous_key)).unlink(missing_ok=True)
+                    except OSError:
+                        app.state.store.read_errors['credentials']=[{'path':credentials_file(previous_key),'error':'사용하지 않는 이전 API 키 파일을 삭제하지 못했습니다.'}]
+                return public_settings(app.state.store,body)
         finally:queue.gpu.release()
 
     @app.post('/api/references')
@@ -176,7 +220,7 @@ def create_app(data_root=None, *, port=8765):
 
     @app.get('/api/llm/model-info')
     def llm_model_info(name: str):
-        _,info=app.state.chat.ollama.local_model(name)
+        _,info=app.state.chat.client.local_model(name)
         return dict(capabilities=info.get('capabilities',[]),thinking=info.get('thinking'))
 
     @app.post('/api/masks')
@@ -223,18 +267,35 @@ def create_app(data_root=None, *, port=8765):
     @app.get('/api/llm/models')
     def llm_models():
         try:
-            return {'models': app.state.chat.ollama.models(), 'error': None}
+            return {'models': app.state.chat.client.models(), 'error': None, 'provider':app.state.preferences.llm_provider, 'base_url':app.state.chat.client.base_url}
         except OllamaError as exc:
-            return {'models': [], 'error': str(exc)}
+            return {'models': [], 'error': str(exc), 'provider':app.state.preferences.llm_provider, 'base_url':app.state.chat.client.base_url}
+
+    @app.get('/api/conversations')
+    def conversations(session: str,include_archived: bool=False):
+        from .conversations import listing
+        return listing(app.state.store,session,include_archived)
+
+    @app.post('/api/conversations')
+    def new_conversation(body: ConversationInput):
+        from .conversations import create
+        return create(app.state.store,body.session)
+
+    @app.post('/api/conversations/update')
+    def update_conversation(body: ConversationUpdate):
+        from .conversations import update
+        return update(app.state.store,body.session,str(body.conversation_id),body.expected_revision,body.title,body.archived)
 
     @app.get('/api/chat')
-    def chat_history(session: str):
-        return app.state.store.chats(session,tolerate_errors=True,include_application=True)
+    def chat_history(session: str,conversation_id: UUID | None=None):
+        from .conversations import default_id
+        return app.state.store.chats(session,tolerate_errors=True,include_application=True,conversation_id=str(conversation_id) if conversation_id else default_id(session))
 
     @app.get('/api/chat/page')
-    def chat_page(session: str,limit: int=Query(default=50,ge=1,le=200),before: UUID | None=None):
+    def chat_page(session: str,limit: int=Query(default=50,ge=1,le=200),before: UUID | None=None,conversation_id: UUID | None=None):
         from .chat_index import page
-        return page(app.state.store,session,limit=limit,before=str(before) if before is not None else None)
+        from .conversations import default_id
+        return page(app.state.store,session,limit=limit,before=str(before) if before is not None else None,conversation_id=str(conversation_id) if conversation_id else default_id(session))
 
     @app.post('/api/chat')
     def chat(body: ChatInput):

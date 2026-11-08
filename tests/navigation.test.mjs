@@ -74,7 +74,7 @@ test('workspace search preserves selection, handles Korean normalization, IDs an
  const status={};const records=[{ref:'a',title:'현재 작업'},{ref:'2026-11/b',title:'꽃밭 Portrait',archived:true}];
  const snapshot=JSON.stringify(records);
  renderWorkspaces(select,status,records,'a','portrait');
- assert.equal(select.value,'a');assert.equal(select.nodes.length,2);assert.equal(select.nodes[1].textContent,'[보관] 꽃밭 Portrait');
+ assert.equal(select.value,'a');assert.equal(select.nodes.length,2);assert.equal(select.nodes[1].textContent,'[숨김] 꽃밭 Portrait');
  assert.match(status.textContent,/1개 검색/);assert.equal(select.disabled,true);
  renderWorkspaces(select,status,records,'a','nothing');
  assert.equal(select.value,'a');assert.equal(select.nodes.length,1);assert.match(status.textContent,/0개/);
@@ -98,7 +98,7 @@ test('workspace cards select safely, show recent changes first and support keybo
  const [recent,current]=list.nodes;
  assert.equal(recent.value,'b');assert.equal(current.children[0].textContent,'<img onerror=bad>');
  assert.equal(current['aria-current'],'true');assert.equal(current.tabIndex,0);
- assert.match(recent.children[1].textContent,/보관됨/);
+ assert.match(recent.children[1].textContent,/숨김/);
  current.onkeydown({key:'Home',preventDefault(){}});
  assert.equal(focused,recent);assert.equal(select.value,'a');assert.equal(changes,0);
  recent.onclick();assert.equal(select.value,'b');assert.equal(changes,1);

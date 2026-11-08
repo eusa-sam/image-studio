@@ -4,13 +4,15 @@ import json
 from .storage import digest,encode,identifier
 
 
-def page(store,session,*,limit=50,before=None):
+def page(store,session,*,limit=50,before=None,conversation_id=None):
     if type(limit) is not int or not 1<=limit<=200:raise ValueError('대화 조회는 1~200개입니다.')
     if before is not None:identifier(before)
     with store._mutex:
         store._ready()
         base=store._session_path(session)
         store._read_json(base+'/session.json')
+        from .conversations import read, default_id
+        if conversation_id is not None:read(store,session,conversation_id)
         scope=base+'/messages'
         index='indexes/messages/'+session
         paths=sorted(p/'meta.json' for p in store._path(scope).glob('*') if p.is_dir())
@@ -26,10 +28,10 @@ def page(store,session,*,limit=50,before=None):
             record=store._read_json(path.relative_to(store.root).as_posix())
             if record['id']!=identifier(path.parent.name) or not isinstance(record['created_at'],str) or record['status'] not in ('PENDING','SUCCEEDED','FAILED','CANCELLED'):
                 raise ValueError('Invalid chat metadata')
-            return {key:record[key] for key in ('id','created_at','status')}
+            return {key:record[key] for key in ('id','created_at','status')} | {'conversation_id':record.get('conversation_id') or default_id(session)}
         try:
             head=store._read_json(index+'/head.json');checksum=head.pop('sha256')
-            if digest(encode(head))!=checksum or head['signature']!=signature or not isinstance(head['pages'],list) or not isinstance(head['errors'],list):raise ValueError('Stale message index')
+            if head.get('conversation_version')!=1 or digest(encode(head))!=checksum or head['signature']!=signature or not isinstance(head['pages'],list) or not isinstance(head['errors'],list):raise ValueError('Stale message index')
             rows=[]
             for number,entry in enumerate(head['pages'],1):
                 if entry['path']!=f'{index}/page-{number:06d}.json':raise ValueError('Invalid message index page')
@@ -53,10 +55,11 @@ def page(store,session,*,limit=50,before=None):
                     path=f'{index}/page-{offset//200+1:06d}.json'
                     content=encode(dict(schema_version=1,items=rows[offset:offset+200]))
                     store._replace(path,content);pages.append(dict(path=path,sha256=digest(content)))
-                head=dict(schema_version=1,signature=signature,pages=pages,errors=store.read_errors[scope])
+                head=dict(schema_version=1,conversation_version=1,signature=signature,pages=pages,errors=store.read_errors[scope])
                 head['sha256']=digest(encode(head));store._replace(index+'/head.json',encode(head))
                 store.read_errors.pop(index,None)
             except (OSError,ValueError) as error:store.read_errors[index]=[dict(path=index,error=str(error))]
+        if conversation_id is not None:rows=[r for r in rows if r['conversation_id']==conversation_id]
         end=len(rows)
         if before is not None:
             end=next((i for i,row in enumerate(rows) if row['id']==before),-1)

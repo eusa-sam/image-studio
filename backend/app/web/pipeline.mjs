@@ -255,6 +255,7 @@ export function jobTiming(job, now=Date.now()) {
 
 export function resultPreview(doc, job, session, {selected, onSelect}={}) {
   const container=doc.createElement('div'),link=doc.createElement('a'),image=doc.createElement('img');
+  container.className='result-preview';
   link.target='_blank';link.rel='noopener noreferrer';link.title='새 탭에서 이미지 크게 보기';
   image.loading='lazy';link.append(image);
   const base=`/api/jobs/${encodeURIComponent(job.id)}/`,query='?session='+encodeURIComponent(session);
@@ -263,7 +264,7 @@ export function resultPreview(doc, job, session, {selected, onSelect}={}) {
   const originalSelected=job.has_original && (originalOnly || selected==='original.png');
   show(originalSelected?'original.png':'image.png',originalSelected?'보존된 생성 원본 · 클릭하면 새 탭에서 열립니다':'생성 결과 · 클릭하면 새 탭에서 열립니다');
   if(job.has_original && !originalOnly) {
-    const controls=doc.createElement('div');controls.className='actions';
+    const controls=doc.createElement('div');controls.className='result-preview-tabs';
     const buttons=[['original.png','보정 전 원본'],['image.png','최종 결과']].map(([name,label])=>{
       const button=doc.createElement('button');button.type='button';button.textContent=label;
       button.setAttribute('aria-pressed',String(name===(originalSelected?'original.png':'image.png')));

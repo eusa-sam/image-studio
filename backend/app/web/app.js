@@ -1,11 +1,13 @@
-import {setupAppSettings} from './settings.mjs?v=20261107-ui32';
-import {setupEmbeddings} from './embeddings.mjs?v=20261107-ui32';
-import {setupGenerationReference,referenceSettings} from './reference.mjs?v=20261107-ui32';
-import { setupImageRuntime } from './runtime.mjs?v=20261107-ui32';
-import {setupMask} from './mask.mjs?v=20261107-ui32';
-import { modelTypes, modelType, setupNavigation, setupStudioTabs, renderWorkspaces } from './navigation.mjs?v=20261107-ui32';
-import { setupChat, sameDraft, proposalSettings } from './chat.mjs?v=20261107-ui32';
-import { modelInventoryRows, imageFamily, modelSelectionSettings, describePipeline, renderPipeline, recordedPipeline, modelChoice, componentCompatibility, renderComponentSelect, jobStatusLabel, renderJobProgress, jobTiming, resultPreview } from './pipeline.mjs?v=20261107-ui32';
+import {setupPanelResize} from './layout.mjs?v=20261109-ui36';
+import {setupConversations} from './conversations.mjs?v=20261109-ui36';
+import {setupAppSettings} from './settings.mjs?v=20261109-ui36';
+import {setupEmbeddings} from './embeddings.mjs?v=20261109-ui36';
+import {setupGenerationReference,referenceSettings} from './reference.mjs?v=20261109-ui36';
+import { setupImageRuntime } from './runtime.mjs?v=20261109-ui36';
+import {setupMask} from './mask.mjs?v=20261109-ui36';
+import { modelTypes, modelType, setupNavigation, setupStudioTabs, renderWorkspaces } from './navigation.mjs?v=20261109-ui36';
+import { setupChat, sameDraft, proposalSettings } from './chat.mjs?v=20261109-ui36';
+import { modelInventoryRows, imageFamily, modelSelectionSettings, describePipeline, renderPipeline, recordedPipeline, modelChoice, componentCompatibility, renderComponentSelect, jobStatusLabel, renderJobProgress, jobTiming, resultPreview } from './pipeline.mjs?v=20261109-ui36';
 const $ = id => document.getElementById(id);
 const refreshImageRuntime=setupImageRuntime({status:$('image-runtime-status'),button:$('release-image-model'),api,onError:message=>notice(message)});
 let modelInventory = [];
@@ -19,7 +21,9 @@ for (let i=0;i<4;i++) {
   const label=document.createElement('label');label.textContent=`LoRA ${i+1}`;
   const select=document.createElement('select');select.id=`lora${i}`;select.append(option('','사용 안 함'));
   const weight=document.createElement('input');weight.id=`lora-weight${i}`;weight.type='number';weight.min='-2';weight.max='2';weight.step='any';weight.value='1';weight.setAttribute('aria-label',`LoRA ${i+1} 강도`);
-  label.append(select,weight);$('lora-slots').append(label);
+  const slot=document.createElement('div');slot.className='lora-slot';
+  const strength=document.createElement('label');strength.textContent='강도';strength.append(weight);
+  label.append(select);slot.append(label,strength);$('lora-slots').append(slot);
 }
 
 let preferences;
@@ -39,7 +43,8 @@ function context() {
   return {session, prompt_id:promptId, expected_revision:revision, positive:$('positive').value,
     negative:$('negative').value, settings:settings()};
 }
-const chat = setupChat({api, getContext:context, isWorkspaceReady:()=>workspaceReady, apply:async (turn,generate) => {
+const conversations=setupConversations({api,getSession:()=>session,onSelect:async()=>{chat.switchWorkspace();await chat.refresh();}});
+const chat = setupChat({api, getContext:()=>({...context(),conversation_id:conversations.id()}), isWorkspaceReady:()=>workspaceReady&&conversations.ready()&&!conversations.archived(), onComplete:()=>conversations.load(), apply:async (turn,generate) => {
   if (!workspaceReady || busy || generationReference.pending() || !sameDraft(turn.context,context())) throw new Error('작업실이 변경되었거나 저장 중입니다. 제안을 다시 확인하세요.');
   busy=true;
   const controls=[...document.querySelectorAll('#editor input, #editor textarea, #editor select, #editor button'), $('sessions'), $('workspace-picker'), $('new-session'), $('rescan')];
@@ -225,11 +230,13 @@ async function changeSession() {
     $('workspace-name').textContent = $('sessions').selectedOptions[0]?.textContent || 'Workspace';
     const record=workspaceRecords.find(row=>row.ref===session);
     $('workspace-title').value=record?.title || '';
-    $('archive-workspace').textContent=record?.archived?'보관 해제':'보관';
+    $('archive-workspace').textContent=record?.archived?'다시 표시':'목록에서 숨기기';
     if (!await refreshPrompts()) return;
     await refreshJobs();
     if (epoch !== workspaceEpoch) return;
     await loadPrompt($('prompts').value);
+    if(epoch!==workspaceEpoch)return;
+    await conversations.load();
     if(epoch!==workspaceEpoch)return;
     workspaceReady=true;$('editor').inert=false;
     await chat.refresh();
@@ -321,7 +328,13 @@ async function refreshJobs() {
     option(j.id,`${j.id.slice(0,8)}${j.status!=='SUCCEEDED'?' · 원본만 보존':''} · ${new Date(j.created_at).toLocaleString()}`)));
   if (jobs.some(j => j.id === source && (j.status === 'SUCCEEDED' || j.has_original))) $('source_job').value=source;
   $('jobs').replaceChildren(...jobs.sort((a,b) => b.created_at.localeCompare(a.created_at)).map(job => {
-    const article = document.createElement('article');
+    const article = document.createElement('article');article.className='result-card';
+    const downloads=document.createElement('section');downloads.className='result-action-group result-downloads';
+    const downloadHeading=document.createElement('h4');downloadHeading.textContent='이미지 다운로드';downloads.append(downloadHeading);
+    const reuse=document.createElement('section');reuse.className='result-action-group result-reuse';
+    const reuseHeading=document.createElement('h4');reuseHeading.textContent='다음 작업에 사용';reuse.append(reuseHeading);
+    const metadata=document.createElement('details');metadata.className='result-metadata';
+    const metadataHeading=document.createElement('summary');metadataHeading.textContent='작업 정보 · 설정과 저장 위치';metadata.append(metadataHeading);
     const title = document.createElement('strong'); title.textContent = `${job.output_status==='PENDING'?'이미지 완료 · 출력 저장 중':jobStatusLabel(job.status)} · ${job.id.slice(0,8)}`; article.append(title);
     const info = document.createElement('p'); info.textContent = new Date(job.created_at).toLocaleString()+(job.plan?.settings ? ' · Seed '+job.plan.settings.seed : ''); article.append(info);
     const progress=document.createElement('div');progress.id='job-progress-'+job.id;progress.className='job-progress';progress.setAttribute('aria-live','polite');renderJobProgress(progress,job);article.append(progress);
@@ -330,14 +343,14 @@ async function refreshJobs() {
       const details=document.createElement('details');details.className='job-pipeline';
       const summary=document.createElement('summary');summary.textContent='요청 당시 구성 / 흐름 보기';
       const flow=document.createElement('div');renderPipeline(flow,recordedPipeline(job.plan));
-      details.append(summary,flow);article.append(details);
+      details.append(summary,flow);metadata.append(details);
     }
     if (['QUEUED','RUNNING','AWAITING_VALIDATION'].includes(job.status)) {
       const button = document.createElement('button'); button.textContent = '작업 취소';
       button.onclick = () => api(`/api/jobs/${job.id}/cancel?session=${encodeURIComponent(selectedSession)}`,{}).then(refreshJobs).catch(e => notice(e.message)); article.append(button);
     }
     if (job.error) { const error = document.createElement('pre'); error.textContent = job.error; article.append(error); }
-    if(job.output_path || job.output_error){const output=document.createElement('p');output.className='hint';output.textContent=job.output_error?'출력 폴더 저장 실패 · Workspace 원본은 보존됨: '+job.output_error:'출력 위치: '+job.output_path;article.append(output);}
+    if(job.output_path || job.output_error){const output=document.createElement('p');output.className='hint';output.textContent=job.output_error?'출력 폴더 저장 실패 · Workspace 원본은 보존됨: '+job.output_error:'출력 위치: '+job.output_path;(job.output_error?article:metadata).append(output);}
     if(job.status==='SUCCEEDED' && ['FAILED','INTERRUPTED'].includes(job.output_status)) {
       const retry=document.createElement('button');retry.textContent='출력 폴더에 다시 저장';
       const session=selectedSession;
@@ -345,16 +358,16 @@ async function refreshJobs() {
       article.append(retry);
     }
     if (job.has_original) {
-      const link=document.createElement('a'); link.className='download'; link.textContent='생성 원본 저장';
+      const link=document.createElement('a'); link.className='download'; link.textContent='생성 원본 PNG';link.title='보정·확대 전 원본 다운로드';
       link.href=`/api/jobs/${job.id}/original.png?session=${encodeURIComponent(selectedSession)}`;
-      link.download=`${job.id}-original.png`; article.append(link);
+      link.download=`${job.id}-original.png`; downloads.append(link);
       if (job.status !== 'SUCCEEDED') {
         article.append(resultPreview(document,job,selectedSession,{selected:resultSelections.get(job.id),onSelect:name=>resultSelections.set(job.id,name)}));
       }
     }
     const detailFiles=(job.artifacts || []).filter(name=>name.startsWith('detail'));
     if(detailFiles.length) {
-      const details=document.createElement('details');const summary=document.createElement('summary');summary.textContent='영역 보정 결과 / 마스크 / 전후 비교';details.append(summary);
+      const details=document.createElement('details');const summary=document.createElement('summary');details.className='result-detail-files';summary.textContent='영역 보정 결과 · 마스크와 전후 비교';details.append(summary);
       for(const name of detailFiles) {const link=document.createElement('a');link.className='download';link.href=`/api/jobs/${job.id}/${name}?session=${encodeURIComponent(selectedSession)}`;link.download=name;link.textContent=name==='detailed.png' ? '보정본' : name==='detail-mask.png' ? '보정 마스크' : name;details.append(link);}
       for(let i=0;i<8;i++) {
         if(!detailFiles.includes(`detail-${i}-before.png`)&&!detailFiles.includes(`detail-${i}-after.png`))continue;
@@ -368,26 +381,29 @@ async function refreshJobs() {
         }
         details.append(pair);
       }
-      article.append(details);
+      metadata.append(details);
     }
     if(job.has_original && originalInputSupported) {
       const originalEdit=document.createElement('button');originalEdit.type='button';originalEdit.textContent='원본으로 변형';
       originalEdit.onclick=()=>{if(busy||!workspaceReady)return;const family=imageFamily(modelInventory.find(m=>m.id===$('model').value));if(family==='zimage'){notice('Z-Image-Turbo는 현재 이미지 변형을 지원하지 않습니다.');return;}if(family==='flux2'){$('flow').value='reference_edit';generationReference.restore({reference_job:job.id,reference_artifact:'original.png'});}else{$('flow').value='img2img';$('source_job').value=job.id;$('source_artifact').value='original.png';$('mask_id').value='';}updateFlow();focusSetting(family==='flux2'?'generation-reference':'source_job');};
-      article.append(originalEdit);
+      reuse.append(originalEdit);
     }
     if (job.status === 'SUCCEEDED') {
       const edit= document.createElement('button'); edit.textContent='최종 결과로 변형';
       edit.onclick=() => { if (busy) return; if(imageFamily(modelInventory.find(m=>m.id===$('model').value))==='zimage'){notice('Z-Image-Turbo는 현재 텍스트 생성만 지원합니다. 이미지 변형을 지원하는 모델을 선택하세요.');return;} if(imageFamily(modelInventory.find(m=>m.id===$('model').value))==='flux2'){$('flow').value='reference_edit';generationReference.restore({reference_job:job.id});updateFlow();focusSetting('generation-reference');}else{$('flow').value='img2img'; $('source_job').value=job.id; $('source_artifact').value='image.png';$('mask_id').value=''; updateFlow(); focusSetting('source_job');} };
-      article.append(edit);
+      reuse.append(edit);
       const reuseSeed=document.createElement('button');reuseSeed.type='button';reuseSeed.textContent='이 Seed 고정';
       reuseSeed.onclick=()=>{if(busy)return;$('random_seed').checked=false;$('seed').value=job.plan.settings.seed;updateFlow();focusSetting('seed');};
-      if(job.plan?.settings)article.append(reuseSeed);
+      if(job.plan?.settings)reuse.append(reuseSeed);
       const base = `/api/jobs/${job.id}/`; const query = '?session=' + encodeURIComponent(selectedSession);
       article.append(resultPreview(document,job,selectedSession,{selected:resultSelections.get(job.id),onSelect:name=>resultSelections.set(job.id,name)}));
-      for (const [name,label] of [['image.png','이미지 저장'],['report.json','실행 설정 / 보고서']]) {
-        const link = document.createElement('a'); link.href = base + name + query; link.download = `${job.id}-${name}`; link.textContent = label; link.className = 'download'; article.append(link);
+      for (const [name,label] of [['image.png','최종 결과 PNG'],['report.json','실행 설정 · 보고서 JSON']]) {
+        const link = document.createElement('a'); link.href = base + name + query; link.download = `${job.id}-${name}`; link.textContent = label; link.className = name==='image.png'?'download download-primary':'download';link.title=name==='image.png'?'보정·확대를 포함한 최종 이미지 다운로드':'생성 설정과 실행 보고서 다운로드';if(name==='image.png')downloads.insertBefore(link,downloads.children[1]||null);else metadata.append(link);
       }
     }
+    if(downloads.children.length>1)article.append(downloads);
+    if(reuse.children.length>1)article.append(reuse);
+    if(metadata.children.length>1)article.append(metadata);
     return article;
   }));
   renderComposition();
@@ -521,8 +537,8 @@ async function updateWorkspace(archive) {
     if(result.archived)$('include-archived').checked=true;
     await refreshWorkspaceList(record.ref);
     $('workspace-name').textContent=$('sessions').selectedOptions[0]?.textContent || result.title;
-    $('archive-workspace').textContent=result.archived?'보관 해제':'보관';
-    $('workspace-status').textContent=result.archived?'보관했습니다. 대화와 이미지는 그대로 유지됩니다.':'저장했습니다.';
+    $('archive-workspace').textContent=result.archived?'다시 표시':'목록에서 숨기기';
+    $('workspace-status').textContent=result.archived?'목록에서 숨겼습니다. 대화·프롬프트·이미지는 유지됩니다.':archive?'Workspace를 다시 표시합니다.':'이름을 저장했습니다.';
   } catch(error){$('workspace-status').textContent=error.message;await refreshWorkspaceList(session);}
   finally {busy=false;controls.forEach(control=>control.disabled=false);}
 }
@@ -533,4 +549,5 @@ $('include-archived').onchange=async()=>{if(busy)return;try {await refreshWorksp
 
 setupMask({api,getContext:context,changed:renderComposition});
 
+setupPanelResize();
 setupAppSettings({api,onSaved:async()=>{await scanModels();await chat.connect();await refreshImageRuntime();}});
